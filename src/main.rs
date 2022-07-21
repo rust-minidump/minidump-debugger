@@ -120,7 +120,10 @@ fn main() {
                     http_timeout_secs: DEFAULT_HTTP_TIMEOUT_SECS.to_string(),
                 },
                 raw_dump_ui_state: RawDumpUiState { cur_stream: 0 },
-                processed_ui_state: ProcessedUiState { cur_thread: 0 },
+                processed_ui_state: ProcessedUiState {
+                    cur_thread: 0,
+                    cur_frame: 0,
+                },
 
                 cur_status: ProcessingStatus::NoDump,
                 last_status: ProcessingStatus::NoDump,
@@ -156,6 +159,7 @@ struct RawDumpUiState {
 
 struct ProcessedUiState {
     cur_thread: usize,
+    cur_frame: usize,
 }
 
 struct Settings {
@@ -402,6 +406,9 @@ impl MyApp {
                 };
             });
         }
+        if ui.button("➕").clicked() {
+            self.settings.symbol_paths.push((String::new(), true));
+        }
 
         ui.add_space(20.0);
         ui.heading("misc settings");
@@ -418,9 +425,10 @@ impl MyApp {
         for idx in to_remove.into_iter().rev() {
             self.settings.symbol_paths.remove(idx);
         }
-        if ui.button("➕").clicked() {
-            self.settings.symbol_paths.push((String::new(), true));
-        }
+        ui.checkbox(
+            &mut self.settings.raw_dump_brief,
+            "hide memory dumps in raw mode",
+        );
 
         ui.add_space(20.0);
         preview_files_being_dropped(ctx);
@@ -536,39 +544,6 @@ impl MyApp {
     }
 
     fn update_raw_dump_top_level(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
-        ui.heading("Minidump Metadata");
-        ui.add_space(20.0);
-        let signature_bytes = dump.header.signature.to_le_bytes();
-        let signature_str = std::str::from_utf8(&signature_bytes).unwrap_or("<invalid ascii>");
-        listing(
-            ui,
-            [
-                ("endian".to_owned(), format!("{:?}", dump.endian)),
-                (
-                    "version".to_owned(),
-                    format!("0x{:08x}", dump.header.version),
-                ),
-                (
-                    "checksum".to_owned(),
-                    format!("0x{:08x}", dump.header.checksum),
-                ),
-                (
-                    "signature".to_owned(),
-                    format!("0x{:08x} ({})", dump.header.signature, signature_str),
-                ),
-                ("flags".to_owned(), format!("0x{:016x}", dump.header.flags)),
-                (
-                    "stream_count".to_owned(),
-                    format!("{}", dump.header.stream_count),
-                ),
-                (
-                    "time_date_stamp".to_owned(),
-                    format!("0x{:08x}", dump.header.time_date_stamp),
-                ),
-            ],
-        );
-
-        ui.separator();
         ui.heading("Minidump Streams");
         ui.add_space(20.0);
 
@@ -648,7 +623,20 @@ impl MyApp {
                         });
                     })
                 }
-            })
+            });
+
+        ui.add_space(20.0);
+        ui.separator();
+        ui.heading("Minidump Metadata");
+        ui.add_space(10.0);
+        let mut bytes = Vec::new();
+        dump.print(&mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.add(
+            egui::TextEdit::multiline(&mut &*text)
+                .font(TextStyle::Monospace)
+                .desired_width(f32::INFINITY),
+        );
     }
 
     fn update_raw_dump_misc_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
@@ -659,16 +647,14 @@ impl MyApp {
             return;
         }
         let stream = stream.unwrap();
-        ui.horizontal_wrapped(|ui| {
-            let mut bytes = Vec::new();
-            stream.print(&mut bytes).unwrap();
-            let text = String::from_utf8(bytes).unwrap();
-            ui.add(
-                egui::TextEdit::multiline(&mut &*text)
-                    .font(TextStyle::Monospace)
-                    .desired_width(f32::INFINITY),
-            );
-        });
+        let mut bytes = Vec::new();
+        stream.print(&mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.add(
+            egui::TextEdit::multiline(&mut &*text)
+                .font(TextStyle::Monospace)
+                .desired_width(f32::INFINITY),
+        );
     }
 
     fn update_raw_dump_thread_names(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
@@ -679,16 +665,14 @@ impl MyApp {
             return;
         }
         let stream = stream.unwrap();
-        ui.horizontal_wrapped(|ui| {
-            let mut bytes = Vec::new();
-            stream.print(&mut bytes).unwrap();
-            let text = String::from_utf8(bytes).unwrap();
-            ui.add(
-                egui::TextEdit::multiline(&mut &*text)
-                    .font(TextStyle::Monospace)
-                    .desired_width(f32::INFINITY),
-            );
-        });
+        let mut bytes = Vec::new();
+        stream.print(&mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.add(
+            egui::TextEdit::multiline(&mut &*text)
+                .font(TextStyle::Monospace)
+                .desired_width(f32::INFINITY),
+        );
     }
 
     fn update_raw_dump_system_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
@@ -997,131 +981,210 @@ impl MyApp {
 
     fn update_processed_good(&mut self, ui: &mut Ui, state: &ProcessState) {
         let is_symbolicated = self.cur_status == ProcessingStatus::Done;
-
-        if let Some(reason) = state.crash_reason {
-            ui.horizontal(|ui| {
-                ui.label("Crash Reason:");
-                ui.monospace(reason.to_string());
-            });
-        }
-        if let Some(addr) = state.crash_address {
-            ui.horizontal(|ui| {
-                ui.label("Crash Address:");
-                ui.monospace(format!("0x{:08x}", addr));
-            });
-        }
-        if let Some(crashing_thread) = state.requesting_thread {
-            if let Some(stack) = state.threads.get(crashing_thread) {
-                ui.horizontal(|ui| {
-                    ui.label("Crashing Thread: ");
-                    ui.label(threadname(stack));
+        StripBuilder::new(ui)
+            .size(Size::relative(0.5))
+            .size(Size::relative(0.5))
+            .vertical(|mut strip| {
+                strip.cell(|ui| {
+                    self.update_processed_data(ui, state);
                 });
-            }
-        }
-        ComboBox::from_label("Thread")
-            .width(200.0)
-            .selected_text(
-                state
-                    .threads
-                    .get(self.processed_ui_state.cur_thread)
-                    .map(threadname)
-                    .unwrap_or_default(),
-            )
-            .show_ui(ui, |ui| {
-                for (idx, stack) in state.threads.iter().enumerate() {
-                    ui.selectable_value(
-                        &mut self.processed_ui_state.cur_thread,
-                        idx,
-                        threadname(stack),
+                strip.cell(|ui| {
+                    ComboBox::from_label("Thread")
+                        .width(400.0)
+                        .selected_text(
+                            state
+                                .threads
+                                .get(self.processed_ui_state.cur_thread)
+                                .map(threadname)
+                                .unwrap_or_default(),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (idx, stack) in state.threads.iter().enumerate() {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.processed_ui_state.cur_thread,
+                                        idx,
+                                        threadname(stack),
+                                    )
+                                    .changed()
+                                {
+                                    self.processed_ui_state.cur_frame = 0;
+                                };
+                            }
+                        });
+
+                    ui.separator();
+
+                    if let Some(stack) = state.threads.get(self.processed_ui_state.cur_thread) {
+                        if is_symbolicated {
+                            self.update_processed_backtrace(ui, stack);
+                        } else {
+                            ui.label("stackwalking in progress...");
+                        }
+                    }
+                });
+            });
+    }
+
+    fn update_processed_data(&mut self, ui: &mut Ui, state: &ProcessState) {
+        let cur_threadname = state
+            .threads
+            .get(self.processed_ui_state.cur_thread)
+            .map(threadname)
+            .unwrap_or_default();
+
+        StripBuilder::new(ui)
+            .size(Size::relative(0.5))
+            .size(Size::relative(0.5))
+            .horizontal(|mut strip| {
+                strip.cell(|ui| {
+                    listing(
+                        ui,
+                        1,
+                        [
+                            ("OS".to_owned(), state.system_info.os.to_string()),
+                            (
+                                "OS version".to_owned(),
+                                state
+                                    .system_info
+                                    .format_os_version()
+                                    .map(|s| s.clone().into_owned())
+                                    .unwrap_or_default(),
+                            ),
+                            ("CPU".to_owned(), state.system_info.cpu.to_string()),
+                            (
+                                "CPU info".to_owned(),
+                                state.system_info.cpu_info.clone().unwrap_or_default(),
+                            ),
+                            // ("Process Create Time".to_owned(), state.process_create_time.map(|s| format!("{:?}", s)).unwrap_or_default()),
+                            // ("Process Crash Time".to_owned(), format!("{:?}", state.time)),
+                            (
+                                "Crash Reason".to_owned(),
+                                state
+                                    .crash_reason
+                                    .map(|r| r.to_string())
+                                    .unwrap_or_default(),
+                            ),
+                            (
+                                "Crash Assertion".to_owned(),
+                                state.assertion.clone().unwrap_or_default(),
+                            ),
+                            (
+                                "Crash Address".to_owned(),
+                                state
+                                    .crash_address
+                                    .map(|addr| format!("0x{:08x}", addr))
+                                    .unwrap_or_default(),
+                            ),
+                            ("Crashing Thread".to_owned(), cur_threadname.clone()),
+                        ],
                     );
+                });
+                strip.cell(|ui| {
+                    ui.add_space(10.0);
+                    ui.heading(format!("Thread {}", cur_threadname));
+                    if let Some(thread) = state.threads.get(self.processed_ui_state.cur_thread) {
+                        listing(
+                            ui,
+                            2,
+                            [(
+                                "last_error_value".to_owned(),
+                                thread
+                                    .last_error_value
+                                    .map(|e| e.to_string())
+                                    .unwrap_or_default(),
+                            )],
+                        );
+                        if let Some(frame) = thread.frames.get(self.processed_ui_state.cur_frame) {
+                            ui.add_space(20.0);
+                            ui.heading(format!("Frame {}", self.processed_ui_state.cur_frame));
+                            let regs = frame
+                                .context
+                                .valid_registers()
+                                .map(|(name, val)| (name.to_owned(), format!("0x{:08x}", val)));
+                            listing(ui, 3, regs);
+                        }
+                    }
+                })
+            });
+    }
+
+    fn update_processed_backtrace(&mut self, ui: &mut Ui, stack: &CallStack) {
+        TableBuilder::new(ui)
+            .striped(true)
+            .cell_layout(egui::Layout::left_to_right().with_cross_align(egui::Align::Center))
+            .column(Size::initial(60.0).at_least(40.0))
+            .column(Size::initial(80.0).at_least(40.0))
+            .column(Size::initial(160.0).at_least(40.0))
+            .column(Size::initial(160.0).at_least(40.0))
+            .column(Size::remainder().at_least(60.0))
+            .resizable(true)
+            .header(20.0, |mut header| {
+                header.col(|ui| {
+                    ui.heading("Frame");
+                });
+                header.col(|ui| {
+                    ui.heading("Trust");
+                });
+                header.col(|ui| {
+                    ui.heading("Module");
+                });
+                header.col(|ui| {
+                    ui.heading("Source");
+                });
+                header.col(|ui| {
+                    ui.heading("Signature");
+                });
+            })
+            .body(|mut body| {
+                for (i, frame) in stack.frames.iter().enumerate() {
+                    let is_thick = false; // thick_row(row_index);
+                    let row_height = if is_thick { 30.0 } else { 18.0 };
+
+                    body.row(row_height, |mut row| {
+                        row.col(|ui| {
+                            ui.centered_and_justified(|ui| {
+                                if ui.link(i.to_string()).clicked() {
+                                    self.processed_ui_state.cur_frame = i;
+                                }
+                            });
+                        });
+                        row.col(|ui| {
+                            let trust = match frame.trust {
+                                minidump_processor::FrameTrust::None => "none",
+                                minidump_processor::FrameTrust::Scan => "scan",
+                                minidump_processor::FrameTrust::CfiScan => "cfi scan",
+                                minidump_processor::FrameTrust::FramePointer => "frame pointer",
+                                minidump_processor::FrameTrust::CallFrameInfo => "cfi",
+                                minidump_processor::FrameTrust::PreWalked => "prewalked",
+                                minidump_processor::FrameTrust::Context => "context",
+                            };
+                            ui.centered_and_justified(|ui| {
+                                ui.label(trust);
+                            });
+                        });
+                        row.col(|ui| {
+                            if let Some(module) = &frame.module {
+                                ui.centered_and_justified(|ui| {
+                                    ui.label(basename(&module.name));
+                                });
+                            }
+                        });
+                        row.col(|ui| {
+                            let mut label = String::new();
+                            frame_source(&mut label, frame).unwrap();
+                            // ui.style_mut().wrap = Some(false);
+                            ui.label(label);
+                        });
+                        row.col(|ui| {
+                            let mut label = String::new();
+                            frame_signature(&mut label, frame).unwrap();
+                            // ui.style_mut().wrap = Some(false);
+                            ui.label(label);
+                        });
+                    });
                 }
             });
-
-        ui.separator();
-
-        if let Some(stack) = state.threads.get(self.processed_ui_state.cur_thread) {
-            if is_symbolicated {
-                TableBuilder::new(ui)
-                    .striped(true)
-                    .cell_layout(
-                        egui::Layout::left_to_right().with_cross_align(egui::Align::Center),
-                    )
-                    .column(Size::initial(60.0).at_least(40.0))
-                    .column(Size::initial(80.0).at_least(40.0))
-                    .column(Size::initial(160.0).at_least(40.0))
-                    .column(Size::initial(160.0).at_least(40.0))
-                    .column(Size::remainder().at_least(60.0))
-                    .resizable(true)
-                    .header(20.0, |mut header| {
-                        header.col(|ui| {
-                            ui.heading("Frame");
-                        });
-                        header.col(|ui| {
-                            ui.heading("Trust");
-                        });
-                        header.col(|ui| {
-                            ui.heading("Module");
-                        });
-                        header.col(|ui| {
-                            ui.heading("Source");
-                        });
-                        header.col(|ui| {
-                            ui.heading("Signature");
-                        });
-                    })
-                    .body(|mut body| {
-                        for (i, frame) in stack.frames.iter().enumerate() {
-                            let is_thick = false; // thick_row(row_index);
-                            let row_height = if is_thick { 30.0 } else { 18.0 };
-
-                            body.row(row_height, |mut row| {
-                                row.col(|ui| {
-                                    ui.centered_and_justified(|ui| {
-                                        ui.label(i.to_string());
-                                    });
-                                });
-                                row.col(|ui| {
-                                    let trust = match frame.trust {
-                                        minidump_processor::FrameTrust::None => "none",
-                                        minidump_processor::FrameTrust::Scan => "scan",
-                                        minidump_processor::FrameTrust::CfiScan => "cfi scan",
-                                        minidump_processor::FrameTrust::FramePointer => {
-                                            "frame pointer"
-                                        }
-                                        minidump_processor::FrameTrust::CallFrameInfo => "cfi",
-                                        minidump_processor::FrameTrust::PreWalked => "prewalked",
-                                        minidump_processor::FrameTrust::Context => "context",
-                                    };
-                                    ui.centered_and_justified(|ui| {
-                                        ui.label(trust);
-                                    });
-                                });
-                                row.col(|ui| {
-                                    if let Some(module) = &frame.module {
-                                        ui.centered_and_justified(|ui| {
-                                            ui.label(basename(&module.name));
-                                        });
-                                    }
-                                });
-                                row.col(|ui| {
-                                    let mut label = String::new();
-                                    frame_source(&mut label, frame).unwrap();
-                                    // ui.style_mut().wrap = Some(false);
-                                    ui.label(label);
-                                });
-                                row.col(|ui| {
-                                    let mut label = String::new();
-                                    frame_signature(&mut label, frame).unwrap();
-                                    // ui.style_mut().wrap = Some(false);
-                                    ui.label(label);
-                                });
-                            });
-                        }
-                    });
-            } else {
-                ui.label("stackwalking in progress...");
-            }
-        }
     }
 
     fn update_logs(&self, ui: &mut Ui, _ctx: &egui::Context) {
@@ -1137,8 +1200,8 @@ impl MyApp {
     }
 }
 
-fn listing(ui: &mut Ui, items: impl IntoIterator<Item = (String, String)>) {
-    ui.push_id(1, |ui| {
+fn listing(ui: &mut Ui, id: u64, items: impl IntoIterator<Item = (String, String)>) {
+    ui.push_id(id, |ui| {
         TableBuilder::new(ui)
             .striped(true)
             .cell_layout(egui::Layout::left_to_right().with_cross_align(egui::Align::Center))
