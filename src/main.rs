@@ -1,8 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 use eframe::egui;
-use egui::{ComboBox, ScrollArea, Ui};
-use egui_extras::{Size, TableBuilder};
+use egui::{ComboBox, TextStyle, Ui, Vec2};
+use egui_extras::{Size, StripBuilder, TableBuilder};
 use memmap2::Mmap;
 use minidump::{format::MINIDUMP_STREAM_TYPE, Minidump, Module};
 use minidump_common::utils::basename;
@@ -15,52 +15,110 @@ use std::{
     sync::{Arc, Condvar, Mutex},
 };
 
+use std::io;
+
+struct MySink(Mutex<io::BufWriter<Vec<u8>>>);
+impl io::Write for &MySink {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().write(bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.lock().unwrap().flush()
+    }
+}
+impl MySink {
+    fn clear(&self) {
+        self.0.lock().unwrap().get_mut().clear()
+    }
+    fn bytes(&self) -> Vec<u8> {
+        self.0.lock().unwrap().get_ref().clone()
+    }
+}
+
 fn main() {
+    let logger = Arc::new(MySink(Mutex::new(io::BufWriter::new(Vec::<u8>::new()))));
+
+    tracing_subscriber::fmt::fmt()
+        .with_max_level(tracing::level_filters::LevelFilter::TRACE)
+        .with_target(false)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logger.clone())
+        .init();
+
     let options = eframe::NativeOptions {
         drag_and_drop_support: true,
+        initial_window_size: Some(Vec2::new(1000.0, 800.0)),
         ..Default::default()
     };
-    let path_sender = Arc::new((Mutex::new(None::<PathBuf>), Condvar::new()));
-    let path_receiver = path_sender.clone();
+    let task_sender = Arc::new((Mutex::new(None::<ProcessorTask>), Condvar::new()));
+    let task_receiver = task_sender.clone();
     let analysis_receiver = Arc::new(MinidumpAnalysis {
         minidump: Arc::new(Mutex::new(None)),
         processed: Arc::new(Mutex::new(None)),
         status: Arc::new(Mutex::new(ProcessingStatus::NoDump)),
     });
     let analysis_sender = analysis_receiver.clone();
-    let _handle = std::thread::spawn(move || {
-        let (lock, condvar) = &*path_receiver;
-        let path = {
-            let mut path = lock.lock().unwrap();
-            if path.is_none() {
-                path = condvar.wait(path).unwrap();
+    let _handle = std::thread::spawn(move || loop {
+        let (lock, condvar) = &*task_receiver;
+        let task = {
+            let mut task = lock.lock().unwrap();
+            if task.is_none() {
+                task = condvar.wait(task).unwrap();
             }
-            path.take().unwrap()
+            task.take().unwrap()
         };
 
-        *analysis_sender.status.lock().unwrap() = ProcessingStatus::ReadingDump;
+        match task {
+            ProcessorTask::Cancel => {
+                // Do nothing, this is only relevant within the other tasks, now we're just clearing it out
+            }
+            ProcessorTask::ReadDump(path) => {
+                *analysis_sender.status.lock().unwrap() = ProcessingStatus::ReadingDump;
+                let dump = Minidump::read_path(path).map(Arc::new);
+                *analysis_sender.minidump.lock().unwrap() = Some(dump);
+            }
+            ProcessorTask::ProcessDump(settings) => {
+                *analysis_sender.status.lock().unwrap() = ProcessingStatus::RawProcessing;
+                let raw_processed =
+                    process_minidump(&task_receiver, &settings, false).map(Arc::new);
+                *analysis_sender.processed.lock().unwrap() = Some(raw_processed);
 
-        let dump = Minidump::read_path(path).map(Arc::new);
-        let ok_dump = dump.as_ref().ok().cloned();
-        *analysis_sender.minidump.lock().unwrap() = Some(dump);
-        if let Some(dump) = ok_dump {
-            *analysis_sender.status.lock().unwrap() = ProcessingStatus::RawProcessing;
-            let raw_processed = process_minidump(&dump, false).map(Arc::new);
-            *analysis_sender.processed.lock().unwrap() = Some(raw_processed);
-
-            *analysis_sender.status.lock().unwrap() = ProcessingStatus::Symbolicating;
-            let symbolicated = process_minidump(&dump, true).map(Arc::new);
-            *analysis_sender.processed.lock().unwrap() = Some(symbolicated);
+                *analysis_sender.status.lock().unwrap() = ProcessingStatus::Symbolicating;
+                let symbolicated = process_minidump(&task_receiver, &settings, true).map(Arc::new);
+                *analysis_sender.processed.lock().unwrap() = Some(symbolicated);
+                *analysis_sender.status.lock().unwrap() = ProcessingStatus::Done;
+            }
         }
-        *analysis_sender.status.lock().unwrap() = ProcessingStatus::Done;
     });
     eframe::run_native(
         "rust-minidump debugger",
         options,
         Box::new(|_cc| {
             Box::new(MyApp {
+                logger,
                 tab: Tab::Settings,
-                settings: Settings { picked_path: None },
+                settings: Settings {
+                    picked_path: None,
+                    raw_dump_brief: true,
+                    symbol_urls: vec![
+                        ("https://symbols.mozilla.org/".to_string(), true),
+                        (
+                            "https://msdl.microsoft.com/download/symbols/".to_string(),
+                            false,
+                        ),
+                        (String::new(), true),
+                    ],
+                    symbol_paths: vec![(String::new(), true)],
+                    symbol_cache: (
+                        std::env::temp_dir()
+                            .join("minidump-cache")
+                            .to_string_lossy()
+                            .into_owned(),
+                        true,
+                    ),
+                    http_timeout_secs: DEFAULT_HTTP_TIMEOUT_SECS.to_string(),
+                },
                 raw_dump_ui_state: RawDumpUiState { cur_stream: 0 },
                 processed_ui_state: ProcessedUiState { cur_thread: 0 },
 
@@ -69,7 +127,7 @@ fn main() {
                 minidump: None,
                 processed: None,
 
-                path_sender,
+                task_sender,
                 analysis_state: analysis_receiver,
             })
         }),
@@ -77,6 +135,7 @@ fn main() {
 }
 
 struct MyApp {
+    logger: Arc<MySink>,
     settings: Settings,
     tab: Tab,
     raw_dump_ui_state: RawDumpUiState,
@@ -87,7 +146,7 @@ struct MyApp {
     minidump: MaybeMinidump,
     processed: MaybeProcessed,
 
-    path_sender: Arc<(Mutex<Option<PathBuf>>, Condvar)>,
+    task_sender: Arc<(Mutex<Option<ProcessorTask>>, Condvar)>,
     analysis_state: Arc<MinidumpAnalysis>,
 }
 
@@ -101,6 +160,11 @@ struct ProcessedUiState {
 
 struct Settings {
     picked_path: Option<String>,
+    symbol_paths: Vec<(String, bool)>,
+    symbol_urls: Vec<(String, bool)>,
+    symbol_cache: (String, bool),
+    http_timeout_secs: String,
+    raw_dump_brief: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -117,6 +181,22 @@ enum Tab {
     Settings,
     Processed,
     RawDump,
+    Logs,
+}
+
+enum ProcessorTask {
+    Cancel,
+    ReadDump(PathBuf),
+    ProcessDump(ProcessDump),
+}
+
+struct ProcessDump {
+    dump: Arc<Minidump<'static, Mmap>>,
+    symbol_paths: Vec<PathBuf>,
+    symbol_urls: Vec<String>,
+    symbol_cache: PathBuf,
+    clear_cache: bool,
+    http_timeout_secs: u64,
 }
 
 type MaybeMinidump = Option<Result<Arc<Minidump<'static, Mmap>>, minidump::Error>>;
@@ -134,8 +214,11 @@ impl eframe::App for MyApp {
         let status = *self.analysis_state.status.lock().unwrap();
         self.cur_status = status;
         let new_minidump = self.analysis_state.minidump.lock().unwrap().take();
-        if new_minidump.is_some() {
-            self.minidump = new_minidump;
+        if let Some(dump) = new_minidump {
+            if let Ok(dump) = &dump {
+                self.process_dump(dump.clone());
+            }
+            self.minidump = Some(dump);
         }
         let new_processed = self.analysis_state.processed.lock().unwrap().take();
         if let Some(processed) = new_processed {
@@ -159,28 +242,87 @@ impl eframe::App for MyApp {
                 if status >= ProcessingStatus::Symbolicating {
                     ui.selectable_value(&mut self.tab, Tab::Processed, "processed");
                 }
+                if status >= ProcessingStatus::RawProcessing {
+                    ui.selectable_value(&mut self.tab, Tab::Logs, "logs");
+                }
             });
             ui.separator();
             match self.tab {
                 Tab::Settings => self.update_settings(ui, ctx),
                 Tab::RawDump => self.update_raw_dump(ui, ctx),
                 Tab::Processed => self.update_processed(ui, ctx),
+                Tab::Logs => self.update_logs(ui, ctx),
             }
         });
         self.last_status = status;
     }
 }
 
+const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 1000;
+
 impl MyApp {
     fn set_path(&mut self, path: PathBuf) {
         self.settings.picked_path = Some(path.display().to_string());
-        let (lock, condvar) = &*self.path_sender;
-        let mut new_path = lock.lock().unwrap();
-        *new_path = Some(path);
+        let (lock, condvar) = &*self.task_sender;
+        let mut new_task = lock.lock().unwrap();
+        *new_task = Some(ProcessorTask::ReadDump(path));
+        self.minidump = None;
+        self.processed = None;
+        self.tab = Tab::Settings;
+        condvar.notify_one();
+    }
+
+    fn process_dump(&mut self, dump: Arc<Minidump<'static, Mmap>>) {
+        if self.cur_status >= ProcessingStatus::Done {
+            self.logger.clear();
+        }
+        let (lock, condvar) = &*self.task_sender;
+        let mut new_task = lock.lock().unwrap();
+
+        let symbol_paths = self
+            .settings
+            .symbol_paths
+            .iter()
+            .filter(|(path, enabled)| *enabled && !path.trim().is_empty())
+            .map(|(path, _enabled)| PathBuf::from(path))
+            .collect();
+        let symbol_urls = self
+            .settings
+            .symbol_urls
+            .iter()
+            .filter(|(url, enabled)| *enabled && !url.trim().is_empty())
+            .map(|(url, _enabled)| url.to_owned())
+            .collect();
+        let (raw_cache, cache_enabled) = &self.settings.symbol_cache;
+        let clear_cache = !cache_enabled;
+        let symbol_cache = PathBuf::from(raw_cache);
+        let http_timeout_secs = self
+            .settings
+            .http_timeout_secs
+            .parse::<u64>()
+            .unwrap_or(DEFAULT_HTTP_TIMEOUT_SECS);
+        *new_task = Some(ProcessorTask::ProcessDump(ProcessDump {
+            dump,
+            symbol_paths,
+            symbol_urls,
+            symbol_cache,
+            clear_cache,
+            http_timeout_secs,
+        }));
+        condvar.notify_one();
+    }
+
+    fn cancel_processing(&mut self) {
+        let (lock, condvar) = &*self.task_sender;
+        let mut new_task = lock.lock().unwrap();
+        *new_task = Some(ProcessorTask::Cancel);
         condvar.notify_one();
     }
 
     fn update_settings(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        ui.add_space(20.0);
+        ui.heading("choose minidump");
+        ui.add_space(10.0);
         let message = match self.cur_status {
             ProcessingStatus::NoDump => "Select or drop a minidump!",
             ProcessingStatus::ReadingDump => "Reading minidump...",
@@ -188,7 +330,28 @@ impl MyApp {
             ProcessingStatus::Symbolicating => "Minidump processed!",
             ProcessingStatus::Done => "Minidump processed!",
         };
-        ui.label(message);
+
+        ui.horizontal(|ui| {
+            ui.label(message);
+
+            let cancellable = match self.cur_status {
+                ProcessingStatus::NoDump | ProcessingStatus::Done => false,
+                ProcessingStatus::ReadingDump
+                | ProcessingStatus::RawProcessing
+                | ProcessingStatus::Symbolicating => true,
+            };
+            ui.add_enabled_ui(cancellable, |ui| {
+                if ui.button("❌ cancel").clicked() {
+                    self.cancel_processing();
+                }
+            });
+            let reprocessable = matches!(&self.minidump, Some(Ok(_)));
+            ui.add_enabled_ui(reprocessable, |ui| {
+                if ui.button("💫 reprocess").clicked() {
+                    self.process_dump(self.minidump.as_ref().unwrap().as_ref().unwrap().clone());
+                }
+            });
+        });
 
         if ui.button("Open file...").clicked() {
             if let Some(path) = rfd::FileDialog::new()
@@ -205,7 +368,61 @@ impl MyApp {
                 ui.monospace(picked_path);
             });
         }
+        ui.add_space(60.0);
+        ui.separator();
+        ui.heading("symbol servers");
+        ui.add_space(10.0);
+        let mut to_remove = vec![];
+        for (idx, (item, enabled)) in self.settings.symbol_urls.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.checkbox(enabled, "");
+                ui.text_edit_singleline(item);
+                if ui.button("❌").clicked() {
+                    to_remove.push(idx);
+                };
+            });
+        }
+        for idx in to_remove.into_iter().rev() {
+            self.settings.symbol_urls.remove(idx);
+        }
+        if ui.button("➕").clicked() {
+            self.settings.symbol_urls.push((String::new(), true));
+        }
 
+        ui.add_space(20.0);
+        ui.heading("local symbols");
+        ui.add_space(10.0);
+        let mut to_remove = vec![];
+        for (idx, (item, enabled)) in self.settings.symbol_paths.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.checkbox(enabled, "");
+                ui.text_edit_singleline(item);
+                if ui.button("❌").clicked() {
+                    to_remove.push(idx);
+                };
+            });
+        }
+
+        ui.add_space(20.0);
+        ui.heading("misc settings");
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.label("symbol cache");
+            ui.checkbox(&mut self.settings.symbol_cache.1, "");
+            ui.text_edit_singleline(&mut self.settings.symbol_cache.0);
+        });
+        ui.horizontal(|ui| {
+            ui.label("http timeout secs");
+            ui.text_edit_singleline(&mut self.settings.http_timeout_secs);
+        });
+        for idx in to_remove.into_iter().rev() {
+            self.settings.symbol_paths.remove(idx);
+        }
+        if ui.button("➕").clicked() {
+            self.settings.symbol_paths.push((String::new(), true));
+        }
+
+        ui.add_space(20.0);
         preview_files_being_dropped(ctx);
 
         // Collect dropped files:
@@ -231,13 +448,138 @@ impl MyApp {
     }
 
     fn update_raw_dump_good(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        StripBuilder::new(ui)
+            .size(Size::exact(180.0))
+            .size(Size::remainder())
+            .horizontal(|mut strip| {
+                strip.cell(|ui| {
+                    self.update_raw_dump_streams(ui, dump);
+                });
+                strip.cell(|ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if self.raw_dump_ui_state.cur_stream == 0 {
+                            self.update_raw_dump_top_level(ui, dump);
+                            return;
+                        }
+                        let stream = dump
+                            .all_streams()
+                            .nth(self.raw_dump_ui_state.cur_stream - 1)
+                            .and_then(|entry| MINIDUMP_STREAM_TYPE::from_u32(entry.stream_type));
+                        if let Some(stream) = stream {
+                            use MINIDUMP_STREAM_TYPE::*;
+                            match stream {
+                                SystemInfoStream => self.update_raw_dump_system_info(ui, dump),
+                                ThreadNamesStream => self.update_raw_dump_thread_names(ui, dump),
+                                MiscInfoStream => self.update_raw_dump_misc_info(ui, dump),
+                                ThreadListStream => self.update_raw_dump_thread_list(ui, dump),
+                                AssertionInfoStream => {
+                                    self.update_raw_dump_assertion_info(ui, dump)
+                                }
+                                BreakpadInfoStream => self.update_raw_dump_breakpad_info(ui, dump),
+                                CrashpadInfoStream => self.update_raw_dump_crashpad_info(ui, dump),
+                                ExceptionStream => self.update_raw_dump_exception(ui, dump),
+                                ModuleListStream => self.update_raw_dump_module_list(ui, dump),
+                                UnloadedModuleListStream => {
+                                    self.update_raw_dump_unloaded_module_list(ui, dump)
+                                }
+                                MemoryListStream => self.update_raw_dump_memory_list(ui, dump),
+                                MemoryInfoListStream => {
+                                    self.update_raw_dump_memory_info_list(ui, dump)
+                                }
+                                /*
+                                LinuxCpuInfo => self.update_raw_dump_linux_cpu_info(ui, dump),
+                                LinuxEnviron => self.update_raw_dump_linux_environ(ui, dump),
+                                LinuxLsbRelease => self.update_raw_dump_linux_lsb_release(ui, dump),
+                                MozMacosCrashInfoStream => self.update_raw_dump_moz_macos_crash_info(ui, dump),
+                                */
+                                _ => {}
+                            }
+                        }
+                    });
+                });
+            });
+    }
+
+    fn update_raw_dump_streams(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        ui.heading("Streams");
+        ui.add_space(20.0);
+        ui.selectable_value(&mut self.raw_dump_ui_state.cur_stream, 0, "<summary>");
+
+        for (i, stream) in dump.all_streams().enumerate() {
+            use MINIDUMP_STREAM_TYPE::*;
+            let (supported, label) =
+                if let Some(stream_type) = MINIDUMP_STREAM_TYPE::from_u32(stream.stream_type) {
+                    let supported = match stream_type {
+                        SystemInfoStream
+                        | MiscInfoStream
+                        | ThreadNamesStream
+                        | ThreadListStream
+                        | AssertionInfoStream
+                        | BreakpadInfoStream
+                        | CrashpadInfoStream
+                        | ExceptionStream
+                        | ModuleListStream
+                        | UnloadedModuleListStream
+                        | MemoryListStream
+                        | MemoryInfoListStream => true,
+                        _ => false,
+                    };
+                    (supported, format!("{:?}", stream_type))
+                } else {
+                    (false, "<unknown>".to_string())
+                };
+
+            ui.add_enabled_ui(supported, |ui| {
+                ui.selectable_value(&mut self.raw_dump_ui_state.cur_stream, i + 1, label);
+            });
+        }
+    }
+
+    fn update_raw_dump_top_level(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        ui.heading("Minidump Metadata");
+        ui.add_space(20.0);
+        let signature_bytes = dump.header.signature.to_le_bytes();
+        let signature_str = std::str::from_utf8(&signature_bytes).unwrap_or("<invalid ascii>");
+        listing(
+            ui,
+            [
+                ("endian".to_owned(), format!("{:?}", dump.endian)),
+                (
+                    "version".to_owned(),
+                    format!("0x{:08x}", dump.header.version),
+                ),
+                (
+                    "checksum".to_owned(),
+                    format!("0x{:08x}", dump.header.checksum),
+                ),
+                (
+                    "signature".to_owned(),
+                    format!("0x{:08x} ({})", dump.header.signature, signature_str),
+                ),
+                ("flags".to_owned(), format!("0x{:016x}", dump.header.flags)),
+                (
+                    "stream_count".to_owned(),
+                    format!("{}", dump.header.stream_count),
+                ),
+                (
+                    "time_date_stamp".to_owned(),
+                    format!("0x{:08x}", dump.header.time_date_stamp),
+                ),
+            ],
+        );
+
+        ui.separator();
+        ui.heading("Minidump Streams");
+        ui.add_space(20.0);
+
+        let row_height = 18.0;
         TableBuilder::new(ui)
             .striped(true)
             .cell_layout(egui::Layout::left_to_right().with_cross_align(egui::Align::Center))
             .column(Size::initial(40.0).at_least(40.0))
             .column(Size::initial(80.0).at_least(40.0))
             .column(Size::initial(80.0).at_least(40.0))
-            .column(Size::remainder())
+            .column(Size::remainder().at_least(60.0))
             .resizable(true)
             .header(20.0, |mut header| {
                 header.col(|ui| {
@@ -255,7 +597,6 @@ impl MyApp {
             })
             .body(|mut body| {
                 for (i, stream) in dump.all_streams().enumerate() {
-                    let row_height = 18.0;
                     body.row(row_height, |mut row| {
                         row.col(|ui| {
                             ui.centered_and_justified(|ui| {
@@ -273,19 +614,367 @@ impl MyApp {
                             });
                         });
                         row.col(|ui| {
-                            let label = if let Some(stream_type) =
+                            use MINIDUMP_STREAM_TYPE::*;
+                            let (supported, label) = if let Some(stream_type) =
                                 MINIDUMP_STREAM_TYPE::from_u32(stream.stream_type)
                             {
-                                format!("{:?}", stream_type)
+                                let supported = match stream_type {
+                                    SystemInfoStream
+                                    | MiscInfoStream
+                                    | ThreadNamesStream
+                                    | ThreadListStream
+                                    | AssertionInfoStream
+                                    | BreakpadInfoStream
+                                    | CrashpadInfoStream
+                                    | ExceptionStream
+                                    | ModuleListStream
+                                    | UnloadedModuleListStream
+                                    | MemoryListStream
+                                    | MemoryInfoListStream => true,
+                                    _ => false,
+                                };
+                                (supported, format!("{:?}", stream_type))
                             } else {
-                                "<unknown>".to_string()
+                                (false, "<unknown>".to_string())
                             };
-                            ui.label(label);
+
+                            if supported {
+                                if ui.link(label).clicked() {
+                                    self.raw_dump_ui_state.cur_stream = i + 1;
+                                }
+                            } else {
+                                ui.label(label);
+                            }
                         });
                     })
                 }
             })
     }
+
+    fn update_raw_dump_misc_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_stream::<minidump::MinidumpMiscInfo>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        ui.horizontal_wrapped(|ui| {
+            let mut bytes = Vec::new();
+            stream.print(&mut bytes).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            ui.add(
+                egui::TextEdit::multiline(&mut &*text)
+                    .font(TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+
+    fn update_raw_dump_thread_names(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_stream::<minidump::MinidumpThreadNames>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        ui.horizontal_wrapped(|ui| {
+            let mut bytes = Vec::new();
+            stream.print(&mut bytes).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            ui.add(
+                egui::TextEdit::multiline(&mut &*text)
+                    .font(TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+
+    fn update_raw_dump_system_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_stream::<minidump::MinidumpSystemInfo>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        let mut bytes = Vec::new();
+        stream.print(&mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.add(
+            egui::TextEdit::multiline(&mut &*text)
+                .font(TextStyle::Monospace)
+                .desired_width(f32::INFINITY),
+        );
+    }
+
+    fn update_raw_dump_thread_list(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let brief = self.settings.raw_dump_brief;
+        let stream = dump.get_stream::<minidump::MinidumpThreadList>();
+        let memory = dump.get_stream::<minidump::MinidumpMemoryList>();
+        let system = dump.get_stream::<minidump::MinidumpSystemInfo>();
+        let misc = dump.get_stream::<minidump::MinidumpMiscInfo>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        let mut bytes = Vec::new();
+        stream
+            .print(
+                &mut bytes,
+                memory.as_ref().ok(),
+                system.as_ref().ok(),
+                misc.as_ref().ok(),
+                brief,
+            )
+            .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.add(
+            egui::TextEdit::multiline(&mut &*text)
+                .font(TextStyle::Monospace)
+                .desired_width(f32::INFINITY),
+        );
+    }
+
+    fn update_raw_dump_assertion_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_stream::<minidump::MinidumpAssertion>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        ui.horizontal_wrapped(|ui| {
+            let mut bytes = Vec::new();
+            stream.print(&mut bytes).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            ui.add(
+                egui::TextEdit::multiline(&mut &*text)
+                    .font(TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+
+    fn update_raw_dump_crashpad_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_stream::<minidump::MinidumpCrashpadInfo>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        ui.horizontal_wrapped(|ui| {
+            let mut bytes = Vec::new();
+            stream.print(&mut bytes).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            ui.add(
+                egui::TextEdit::multiline(&mut &*text)
+                    .font(TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+
+    fn update_raw_dump_breakpad_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_stream::<minidump::MinidumpBreakpadInfo>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        ui.horizontal_wrapped(|ui| {
+            let mut bytes = Vec::new();
+            stream.print(&mut bytes).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            ui.add(
+                egui::TextEdit::multiline(&mut &*text)
+                    .font(TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+
+    fn update_raw_dump_exception(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let system_info = dump.get_stream::<minidump::MinidumpSystemInfo>();
+        let misc_info = dump.get_stream::<minidump::MinidumpMiscInfo>();
+        let stream = dump.get_stream::<minidump::MinidumpException>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        ui.horizontal_wrapped(|ui| {
+            let mut bytes = Vec::new();
+            stream
+                .print(
+                    &mut bytes,
+                    system_info.as_ref().ok(),
+                    misc_info.as_ref().ok(),
+                )
+                .unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            ui.add(
+                egui::TextEdit::multiline(&mut &*text)
+                    .font(TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+
+    fn update_raw_dump_module_list(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_stream::<minidump::MinidumpModuleList>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        ui.horizontal_wrapped(|ui| {
+            let mut bytes = Vec::new();
+            stream.print(&mut bytes).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            ui.add(
+                egui::TextEdit::multiline(&mut &*text)
+                    .font(TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+
+    fn update_raw_dump_unloaded_module_list(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_stream::<minidump::MinidumpUnloadedModuleList>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        ui.horizontal_wrapped(|ui| {
+            let mut bytes = Vec::new();
+            stream.print(&mut bytes).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            ui.add(
+                egui::TextEdit::multiline(&mut &*text)
+                    .font(TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+
+    fn update_raw_dump_memory_list(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let brief = self.settings.raw_dump_brief;
+        let stream = dump.get_stream::<minidump::MinidumpMemoryList>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        ui.horizontal_wrapped(|ui| {
+            let mut bytes = Vec::new();
+            stream.print(&mut bytes, brief).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            ui.add(
+                egui::TextEdit::multiline(&mut &*text)
+                    .font(TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+
+    fn update_raw_dump_memory_info_list(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_stream::<minidump::MinidumpMemoryInfoList>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        ui.horizontal_wrapped(|ui| {
+            let mut bytes = Vec::new();
+            stream.print(&mut bytes).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            ui.add(
+                egui::TextEdit::multiline(&mut &*text)
+                    .font(TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+    /*
+       fn update_raw_dump_linux_cpu_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+           let stream = dump.get_stream::<minidump::MinidumpLinuxCpuInfo>();
+           if let Err(e) = &stream {
+               ui.label("Failed to read stream");
+               ui.label(e.to_string());
+               return;
+           }
+           let stream = stream.unwrap();
+           ui.horizontal_wrapped(|ui| {
+               let mut bytes = Vec::new();
+               for (k, v) in stream.iter() {
+
+               }
+               stream.print(&mut bytes).unwrap();
+               let text = String::from_utf8(bytes).unwrap();
+               ui.monospace(text);
+           });
+       }
+
+       fn update_raw_dump_linux_environ(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+           let stream = dump.get_stream::<minidump::MinidumpLinuxEnviron>();
+           if let Err(e) = &stream {
+               ui.label("Failed to read stream");
+               ui.label(e.to_string());
+               return;
+           }
+           let stream = stream.unwrap();
+           ui.horizontal_wrapped(|ui| {
+               let mut bytes = Vec::new();
+               stream.print(&mut bytes).unwrap();
+               let text = String::from_utf8(bytes).unwrap();
+               ui.monospace(text);
+           });
+       }
+
+       fn update_raw_dump_linux_lsb_release(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+           let stream = dump.get_stream::<minidump::MinidumpLinuxLsbRelease>();
+           if let Err(e) = &stream {
+               ui.label("Failed to read stream");
+               ui.label(e.to_string());
+               return;
+           }
+           let stream = stream.unwrap();
+           ui.horizontal_wrapped(|ui| {
+               let mut bytes = Vec::new();
+               stream.print(&mut bytes).unwrap();
+               let text = String::from_utf8(bytes).unwrap();
+               ui.monospace(text);
+           });
+       }
+
+       fn update_raw_dump_moz_macos_crash_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+           let stream = dump.get_stream::<minidump::MinidumpMacCrashInfo>();
+           if let Err(e) = &stream {
+               ui.label("Failed to read stream");
+               ui.label(e.to_string());
+               return;
+           }
+           let stream = stream.unwrap();
+           ui.horizontal_wrapped(|ui| {
+               let mut bytes = Vec::new();
+               stream.print(&mut bytes).unwrap();
+               let text = String::from_utf8(bytes).unwrap();
+               ui.monospace(text);
+           });
+       }
+    */
 
     fn update_processed(&mut self, ui: &mut Ui, _ctx: &egui::Context) {
         if let Some(Err(e)) = &self.minidump {
@@ -309,141 +998,171 @@ impl MyApp {
     fn update_processed_good(&mut self, ui: &mut Ui, state: &ProcessState) {
         let is_symbolicated = self.cur_status == ProcessingStatus::Done;
 
-        ScrollArea::vertical()
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                if let Some(reason) = state.crash_reason {
-                    ui.horizontal(|ui| {
-                        ui.label("Crash Reason:");
-                        ui.monospace(reason.to_string());
-                    });
-                }
-                if let Some(addr) = state.crash_address {
-                    ui.horizontal(|ui| {
-                        ui.label("Crash Address:");
-                        ui.monospace(format!("0x{:08x}", addr));
-                    });
-                }
-                if let Some(crashing_thread) = state.requesting_thread {
-                    if let Some(stack) = state.threads.get(crashing_thread) {
-                        ui.horizontal(|ui| {
-                            ui.label("Crashing Thread: ");
-                            ui.label(threadname(stack));
-                        });
-                    }
-                }
-                ComboBox::from_label("Thread")
-                    .width(200.0)
-                    .selected_text(
-                        state
-                            .threads
-                            .get(self.processed_ui_state.cur_thread)
-                            .map(threadname)
-                            .unwrap_or_default(),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (idx, stack) in state.threads.iter().enumerate() {
-                            ui.selectable_value(
-                                &mut self.processed_ui_state.cur_thread,
-                                idx,
-                                threadname(stack),
-                            );
-                        }
-                    });
-
-                if let Some(stack) = state.threads.get(self.processed_ui_state.cur_thread) {
-                    if is_symbolicated {
-                        TableBuilder::new(ui)
-                            .striped(true)
-                            .cell_layout(
-                                egui::Layout::left_to_right().with_cross_align(egui::Align::Center),
-                            )
-                            .column(Size::initial(60.0).at_least(40.0))
-                            .column(Size::initial(80.0).at_least(40.0))
-                            .column(Size::remainder())
-                            .column(Size::initial(80.0).at_least(40.0))
-                            .column(Size::initial(60.0).at_least(40.0))
-                            .resizable(true)
-                            .header(20.0, |mut header| {
-                                header.col(|ui| {
-                                    ui.heading("Frame");
-                                });
-                                header.col(|ui| {
-                                    ui.heading("Module");
-                                });
-                                header.col(|ui| {
-                                    ui.heading("Signature");
-                                });
-                                header.col(|ui| {
-                                    ui.heading("Source");
-                                });
-                                header.col(|ui| {
-                                    ui.heading("Trust");
-                                });
-                            })
-                            .body(|mut body| {
-                                for (i, frame) in stack.frames.iter().enumerate() {
-                                    let is_thick = false; // thick_row(row_index);
-                                    let row_height = if is_thick { 30.0 } else { 18.0 };
-
-                                    body.row(row_height, |mut row| {
-                                        row.col(|ui| {
-                                            ui.centered_and_justified(|ui| {
-                                                ui.label(i.to_string());
-                                            });
-                                        });
-                                        row.col(|ui| {
-                                            if let Some(module) = &frame.module {
-                                                ui.centered_and_justified(|ui| {
-                                                    ui.label(basename(&module.name));
-                                                });
-                                            }
-                                        });
-                                        row.col(|ui| {
-                                            let mut label = String::new();
-                                            frame_signature(&mut label, frame).unwrap();
-                                            // ui.style_mut().wrap = Some(false);
-                                            ui.label(label);
-                                        });
-                                        row.col(|ui| {
-                                            let mut label = String::new();
-                                            frame_source(&mut label, frame).unwrap();
-                                            // ui.style_mut().wrap = Some(false);
-                                            ui.label(label);
-                                        });
-                                        row.col(|ui| {
-                                            let trust = match frame.trust {
-                                                minidump_processor::FrameTrust::None => "none",
-                                                minidump_processor::FrameTrust::Scan => "scan",
-                                                minidump_processor::FrameTrust::CfiScan => {
-                                                    "cfi scan"
-                                                }
-                                                minidump_processor::FrameTrust::FramePointer => {
-                                                    "frame pointer"
-                                                }
-                                                minidump_processor::FrameTrust::CallFrameInfo => {
-                                                    "cfi"
-                                                }
-                                                minidump_processor::FrameTrust::PreWalked => {
-                                                    "prewalked"
-                                                }
-                                                minidump_processor::FrameTrust::Context => {
-                                                    "context"
-                                                }
-                                            };
-                                            ui.centered_and_justified(|ui| {
-                                                ui.label(trust);
-                                            });
-                                        });
-                                    });
-                                }
-                            });
-                    } else {
-                        ui.label("stackwalking in progress...");
-                    }
+        if let Some(reason) = state.crash_reason {
+            ui.horizontal(|ui| {
+                ui.label("Crash Reason:");
+                ui.monospace(reason.to_string());
+            });
+        }
+        if let Some(addr) = state.crash_address {
+            ui.horizontal(|ui| {
+                ui.label("Crash Address:");
+                ui.monospace(format!("0x{:08x}", addr));
+            });
+        }
+        if let Some(crashing_thread) = state.requesting_thread {
+            if let Some(stack) = state.threads.get(crashing_thread) {
+                ui.horizontal(|ui| {
+                    ui.label("Crashing Thread: ");
+                    ui.label(threadname(stack));
+                });
+            }
+        }
+        ComboBox::from_label("Thread")
+            .width(200.0)
+            .selected_text(
+                state
+                    .threads
+                    .get(self.processed_ui_state.cur_thread)
+                    .map(threadname)
+                    .unwrap_or_default(),
+            )
+            .show_ui(ui, |ui| {
+                for (idx, stack) in state.threads.iter().enumerate() {
+                    ui.selectable_value(
+                        &mut self.processed_ui_state.cur_thread,
+                        idx,
+                        threadname(stack),
+                    );
                 }
             });
+
+        ui.separator();
+
+        if let Some(stack) = state.threads.get(self.processed_ui_state.cur_thread) {
+            if is_symbolicated {
+                TableBuilder::new(ui)
+                    .striped(true)
+                    .cell_layout(
+                        egui::Layout::left_to_right().with_cross_align(egui::Align::Center),
+                    )
+                    .column(Size::initial(60.0).at_least(40.0))
+                    .column(Size::initial(80.0).at_least(40.0))
+                    .column(Size::initial(160.0).at_least(40.0))
+                    .column(Size::initial(160.0).at_least(40.0))
+                    .column(Size::remainder().at_least(60.0))
+                    .resizable(true)
+                    .header(20.0, |mut header| {
+                        header.col(|ui| {
+                            ui.heading("Frame");
+                        });
+                        header.col(|ui| {
+                            ui.heading("Trust");
+                        });
+                        header.col(|ui| {
+                            ui.heading("Module");
+                        });
+                        header.col(|ui| {
+                            ui.heading("Source");
+                        });
+                        header.col(|ui| {
+                            ui.heading("Signature");
+                        });
+                    })
+                    .body(|mut body| {
+                        for (i, frame) in stack.frames.iter().enumerate() {
+                            let is_thick = false; // thick_row(row_index);
+                            let row_height = if is_thick { 30.0 } else { 18.0 };
+
+                            body.row(row_height, |mut row| {
+                                row.col(|ui| {
+                                    ui.centered_and_justified(|ui| {
+                                        ui.label(i.to_string());
+                                    });
+                                });
+                                row.col(|ui| {
+                                    let trust = match frame.trust {
+                                        minidump_processor::FrameTrust::None => "none",
+                                        minidump_processor::FrameTrust::Scan => "scan",
+                                        minidump_processor::FrameTrust::CfiScan => "cfi scan",
+                                        minidump_processor::FrameTrust::FramePointer => {
+                                            "frame pointer"
+                                        }
+                                        minidump_processor::FrameTrust::CallFrameInfo => "cfi",
+                                        minidump_processor::FrameTrust::PreWalked => "prewalked",
+                                        minidump_processor::FrameTrust::Context => "context",
+                                    };
+                                    ui.centered_and_justified(|ui| {
+                                        ui.label(trust);
+                                    });
+                                });
+                                row.col(|ui| {
+                                    if let Some(module) = &frame.module {
+                                        ui.centered_and_justified(|ui| {
+                                            ui.label(basename(&module.name));
+                                        });
+                                    }
+                                });
+                                row.col(|ui| {
+                                    let mut label = String::new();
+                                    frame_source(&mut label, frame).unwrap();
+                                    // ui.style_mut().wrap = Some(false);
+                                    ui.label(label);
+                                });
+                                row.col(|ui| {
+                                    let mut label = String::new();
+                                    frame_signature(&mut label, frame).unwrap();
+                                    // ui.style_mut().wrap = Some(false);
+                                    ui.label(label);
+                                });
+                            });
+                        }
+                    });
+            } else {
+                ui.label("stackwalking in progress...");
+            }
+        }
     }
+
+    fn update_logs(&self, ui: &mut Ui, _ctx: &egui::Context) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let bytes = self.logger.bytes();
+            let text = String::from_utf8(bytes).expect("logs weren't utf8");
+            ui.add(
+                egui::TextEdit::multiline(&mut &*text)
+                    .font(TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+}
+
+fn listing(ui: &mut Ui, items: impl IntoIterator<Item = (String, String)>) {
+    ui.push_id(1, |ui| {
+        TableBuilder::new(ui)
+            .striped(true)
+            .cell_layout(egui::Layout::left_to_right().with_cross_align(egui::Align::Center))
+            .column(Size::initial(120.0).at_least(40.0))
+            .column(Size::remainder().at_least(60.0))
+            .resizable(true)
+            .body(|mut body| {
+                for (lhs, rhs) in items {
+                    let row_height = 18.0;
+                    body.row(row_height, |mut row| {
+                        row.col(|ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut &*lhs).desired_width(f32::INFINITY),
+                            );
+                        });
+                        row.col(|ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut &*rhs).desired_width(f32::INFINITY),
+                            );
+                        });
+                    });
+                }
+            });
+    });
 }
 
 /// Preview hovering files:
@@ -479,28 +1198,32 @@ fn preview_files_being_dropped(ctx: &egui::Context) {
 }
 
 fn process_minidump(
-    minidump: &Minidump<Mmap>,
+    _task_receiver: &Arc<(Mutex<Option<ProcessorTask>>, Condvar)>,
+    settings: &ProcessDump,
     symbolicate: bool,
 ) -> Result<ProcessState, minidump_processor::ProcessError> {
-    // Configure the symbolizer and processor
-    let symbols_urls = if symbolicate {
-        vec!["https://symbols.mozilla.org".to_string()]
+    let (symbol_paths, symbol_urls) = if symbolicate {
+        (settings.symbol_paths.clone(), settings.symbol_urls.clone())
     } else {
-        vec![]
+        (vec![], vec![])
     };
-    let symbols_paths = vec![];
-    let mut symbols_cache = std::env::temp_dir();
-    symbols_cache.push("minidump-cache");
+
+    // Configure the symbolizer and processor
+    let symbols_cache = settings.symbol_cache.clone();
+    if settings.clear_cache {
+        let _ = std::fs::remove_dir_all(&symbols_cache);
+    }
+    let _ = std::fs::create_dir_all(&symbols_cache);
     let symbols_tmp = std::env::temp_dir();
-    let timeout = std::time::Duration::from_secs(1000);
+    let timeout = std::time::Duration::from_secs(settings.http_timeout_secs);
 
     // Use ProcessorOptions for detailed configuration
     let options = ProcessorOptions::default();
 
     // Specify a symbol supplier (here we're using the most powerful one, the http supplier)
     let provider = Symbolizer::new(http_symbol_supplier(
-        symbols_paths,
-        symbols_urls,
+        symbol_paths,
+        symbol_urls,
         symbols_cache,
         symbols_tmp,
         timeout,
@@ -512,7 +1235,8 @@ fn process_minidump(
         .unwrap();
     let state = runtime.block_on(async {
         let state =
-            minidump_processor::process_minidump_with_options(&minidump, &provider, options).await;
+            minidump_processor::process_minidump_with_options(&settings.dump, &provider, options)
+                .await;
         state
     })?;
 
