@@ -29,6 +29,7 @@ At this point the UI is mostly at parity with [minidump-stackwalk](https://githu
 * make more text selectable (bare labels suck for most of what we display)
 * don't make the `symbol cache` checkbox so terribly dangerous (will blindly delete the dir at that path, should just disable the cache)
 
+# Screenshots
 
 ![Screenshot 2022-07-21 171657](https://user-images.githubusercontent.com/1136864/180317424-c6abb289-dc63-4aa7-a092-2e29b5fb88aa.png)
 
