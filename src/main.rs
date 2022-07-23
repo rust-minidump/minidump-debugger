@@ -3,6 +3,7 @@
 use eframe::egui;
 use egui::{ComboBox, TextStyle, Ui, Vec2};
 use egui_extras::{Size, StripBuilder, TableBuilder};
+use logger::MapLogger;
 use memmap2::Mmap;
 use minidump::{format::MINIDUMP_STREAM_TYPE, Minidump, Module};
 use minidump_common::utils::basename;
@@ -15,40 +16,13 @@ use std::{
     path::PathBuf,
     sync::{Arc, Condvar, Mutex},
 };
-
-use std::io;
-
-struct MySink(Mutex<io::BufWriter<Vec<u8>>>);
-impl io::Write for &MySink {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().write(bytes)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        self.0.lock().unwrap().flush()
-    }
-}
-impl MySink {
-    fn clear(&self) {
-        self.0.lock().unwrap().get_mut().clear()
-    }
-    fn bytes(&self) -> Vec<u8> {
-        use std::io::Write;
-        let mut buf = self.0.lock().unwrap();
-        buf.flush().unwrap();
-        buf.get_ref().clone()
-    }
-}
+use tracing_subscriber::prelude::*;
+mod logger;
 
 fn main() {
-    let logger = Arc::new(MySink(Mutex::new(io::BufWriter::new(Vec::<u8>::new()))));
+    let logger = MapLogger::new();
 
-    tracing_subscriber::fmt::fmt()
-        .with_max_level(tracing::level_filters::LevelFilter::TRACE)
-        .with_target(false)
-        .without_time()
-        .with_ansi(false)
-        .with_writer(logger.clone())
-        .init();
+    tracing_subscriber::registry().with(logger.clone()).init();
 
     let options = eframe::NativeOptions {
         drag_and_drop_support: true,
@@ -123,6 +97,10 @@ fn main() {
                     cur_thread: 0,
                     cur_frame: 0,
                 },
+                log_ui_state: LogUiState {
+                    cur_thread: None,
+                    cur_frame: None,
+                },
 
                 cur_status: ProcessingStatus::NoDump,
                 last_status: ProcessingStatus::NoDump,
@@ -137,11 +115,12 @@ fn main() {
 }
 
 struct MyApp {
-    logger: Arc<MySink>,
+    logger: MapLogger,
     settings: Settings,
     tab: Tab,
     raw_dump_ui_state: RawDumpUiState,
     processed_ui_state: ProcessedUiState,
+    log_ui_state: LogUiState,
 
     cur_status: ProcessingStatus,
     last_status: ProcessingStatus,
@@ -159,6 +138,11 @@ struct RawDumpUiState {
 struct ProcessedUiState {
     cur_thread: usize,
     cur_frame: usize,
+}
+
+struct LogUiState {
+    cur_thread: Option<usize>,
+    cur_frame: Option<usize>,
 }
 
 struct Settings {
@@ -1242,7 +1226,12 @@ impl MyApp {
                                 minidump_processor::FrameTrust::Context => "context",
                             };
                             ui.centered_and_justified(|ui| {
-                                ui.label(trust);
+                                if ui.link(trust).clicked() {
+                                    self.tab = Tab::Logs;
+                                    self.log_ui_state.cur_thread =
+                                        Some(self.processed_ui_state.cur_thread);
+                                    self.log_ui_state.cur_frame = Some(i);
+                                }
                             });
                         });
                         row.col(|ui| {
@@ -1269,12 +1258,70 @@ impl MyApp {
             });
     }
 
-    fn update_logs(&self, ui: &mut Ui, _ctx: &egui::Context) {
+    fn update_logs(&mut self, ui: &mut Ui, _ctx: &egui::Context) {
+        let ui_state = &mut self.log_ui_state;
+        if let Some(Ok(state)) = &self.processed {
+            ComboBox::from_label("Thread")
+                .width(400.0)
+                .selected_text(
+                    ui_state
+                        .cur_thread
+                        .and_then(|thread| state.threads.get(thread).map(threadname))
+                        .unwrap_or_default(),
+                )
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_value(&mut ui_state.cur_thread, None, "")
+                        .changed()
+                    {
+                        ui_state.cur_frame = None;
+                    };
+                    for (idx, stack) in state.threads.iter().enumerate() {
+                        if ui
+                            .selectable_value(
+                                &mut ui_state.cur_thread,
+                                Some(idx),
+                                threadname(stack),
+                            )
+                            .changed()
+                        {
+                            ui_state.cur_frame = None;
+                        };
+                    }
+                });
+            let thread = ui_state.cur_thread.and_then(|t| state.threads.get(t));
+            if let Some(thread) = thread {
+                ComboBox::from_label("Frame")
+                    .width(100.0)
+                    .selected_text(
+                        ui_state
+                            .cur_frame
+                            .map(|f| f.to_string())
+                            .unwrap_or_default(),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut ui_state.cur_frame, None, "");
+                        for (idx, _stack) in thread.frames.iter().enumerate() {
+                            ui.selectable_value(
+                                &mut ui_state.cur_frame,
+                                Some(idx),
+                                idx.to_string(),
+                            );
+                        }
+                    });
+            }
+        }
+
+        // Print the logs
         egui::ScrollArea::vertical().show(ui, |ui| {
-            let bytes = self.logger.bytes();
-            let text = String::from_utf8(bytes).expect("logs weren't utf8");
+            let span_to_print = match (ui_state.cur_thread, ui_state.cur_frame) {
+                (Some(t), Some(f)) => self.logger.id_for_frame(t, f),
+                (Some(t), None) => self.logger.id_for_thread(t),
+                _ => None,
+            };
+            let text = self.logger.string(span_to_print);
             ui.add(
-                egui::TextEdit::multiline(&mut &*text)
+                egui::TextEdit::multiline(&mut &**text)
                     .font(TextStyle::Monospace)
                     .desired_width(f32::INFINITY),
             );
