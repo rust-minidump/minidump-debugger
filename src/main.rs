@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
+use breakpad_symbols::PendingStats;
 use eframe::egui;
 use egui::{ComboBox, TextStyle, Ui, Vec2};
 use egui_extras::{Size, StripBuilder, TableBuilder};
@@ -8,6 +9,7 @@ use minidump::{format::MINIDUMP_STREAM_TYPE, Minidump, Module};
 use minidump_common::utils::basename;
 use minidump_processor::{
     http_symbol_supplier, CallStack, ProcessState, ProcessorOptions, StackFrame, Symbolizer,
+    WalkedFrame,
 };
 use num_traits::FromPrimitive;
 use std::{
@@ -31,7 +33,10 @@ impl MySink {
         self.0.lock().unwrap().get_mut().clear()
     }
     fn bytes(&self) -> Vec<u8> {
-        self.0.lock().unwrap().get_ref().clone()
+        use std::io::Write;
+        let mut buf = self.0.lock().unwrap();
+        buf.flush().unwrap();
+        buf.get_ref().clone()
     }
 }
 
@@ -53,12 +58,9 @@ fn main() {
     };
     let task_sender = Arc::new((Mutex::new(None::<ProcessorTask>), Condvar::new()));
     let task_receiver = task_sender.clone();
-    let analysis_receiver = Arc::new(MinidumpAnalysis {
-        minidump: Arc::new(Mutex::new(None)),
-        processed: Arc::new(Mutex::new(None)),
-        status: Arc::new(Mutex::new(ProcessingStatus::NoDump)),
-    });
+    let analysis_receiver = Arc::new(MinidumpAnalysis::default());
     let analysis_sender = analysis_receiver.clone();
+    let logger_handle = logger.clone();
     let _handle = std::thread::spawn(move || loop {
         let (lock, condvar) = &*task_receiver;
         let task = {
@@ -74,20 +76,18 @@ fn main() {
                 // Do nothing, this is only relevant within the other tasks, now we're just clearing it out
             }
             ProcessorTask::ReadDump(path) => {
-                *analysis_sender.status.lock().unwrap() = ProcessingStatus::ReadingDump;
+                // Read the dump
                 let dump = Minidump::read_path(path).map(Arc::new);
                 *analysis_sender.minidump.lock().unwrap() = Some(dump);
             }
             ProcessorTask::ProcessDump(settings) => {
-                *analysis_sender.status.lock().unwrap() = ProcessingStatus::RawProcessing;
-                let raw_processed =
-                    process_minidump(&task_receiver, &settings, false).map(Arc::new);
-                *analysis_sender.processed.lock().unwrap() = Some(raw_processed);
+                // Reset all stats
+                *analysis_sender.stats.lock().unwrap() = ProcessingStats::default();
+                logger_handle.clear();
 
-                *analysis_sender.status.lock().unwrap() = ProcessingStatus::Symbolicating;
-                let symbolicated = process_minidump(&task_receiver, &settings, true).map(Arc::new);
-                *analysis_sender.processed.lock().unwrap() = Some(symbolicated);
-                *analysis_sender.status.lock().unwrap() = ProcessingStatus::Done;
+                // Do the processing
+                let processed = process_minidump(&task_receiver, &analysis_sender, &settings, true);
+                *analysis_sender.processed.lock().unwrap() = processed.map(|p| p.map(Arc::new));
             }
         }
     });
@@ -171,8 +171,9 @@ struct Settings {
     raw_dump_brief: bool,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ProcessingStatus {
+    #[default]
     NoDump,
     ReadingDump,
     RawProcessing,
@@ -206,17 +207,25 @@ struct ProcessDump {
 type MaybeMinidump = Option<Result<Arc<Minidump<'static, Mmap>>, minidump::Error>>;
 type MaybeProcessed = Option<Result<Arc<ProcessState>, minidump_processor::ProcessError>>;
 
+#[derive(Default, Clone)]
 struct MinidumpAnalysis {
     minidump: Arc<Mutex<MaybeMinidump>>,
     processed: Arc<Mutex<MaybeProcessed>>,
-    status: Arc<Mutex<ProcessingStatus>>,
+    stats: Arc<Mutex<ProcessingStats>>,
+}
+
+#[derive(Default, Clone)]
+struct ProcessingStats {
+    threads_processed: Arc<Mutex<(u64, u64)>>,
+    frames_processed: Arc<Mutex<u64>>,
+    processed_frames: Arc<Mutex<Vec<WalkedFrame>>>,
+    partial: Arc<Mutex<Option<ProcessState>>>,
+    pending_symbols: Arc<Mutex<PendingStats>>,
 }
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Fetch updates from processing thread
-        let status = *self.analysis_state.status.lock().unwrap();
-        self.cur_status = status;
         let new_minidump = self.analysis_state.minidump.lock().unwrap().take();
         if let Some(dump) = new_minidump {
             if let Ok(dump) = &dump {
@@ -224,11 +233,45 @@ impl eframe::App for MyApp {
             }
             self.minidump = Some(dump);
         }
+
+        if self.cur_status < ProcessingStatus::Done {
+            let stats = self.analysis_state.stats.lock().unwrap();
+            let partial = stats.partial.lock().unwrap().take();
+            if let Some(state) = partial {
+                if self.tab == Tab::Settings && self.cur_status <= ProcessingStatus::RawProcessing {
+                    self.tab = Tab::Processed;
+                }
+                self.cur_status = ProcessingStatus::Symbolicating;
+
+                if let Some(crashed_thread) = state.requesting_thread {
+                    self.processed_ui_state.cur_thread = crashed_thread;
+                }
+                self.processed = Some(Ok(Arc::new(state)));
+            }
+
+            if let Some(partial) = self.processed.as_mut().and_then(|p| p.as_mut().ok()) {
+                let partial = Arc::make_mut(partial);
+                let mut new_frames = stats.processed_frames.lock().unwrap();
+                for frame in new_frames.drain(..) {
+                    let thread = &mut partial.threads[frame.thread_idx];
+                    if thread.frames.len() > frame.frame_idx {
+                        // Allows us to overwrite the old context frame
+                        thread.frames[frame.frame_idx] = frame.frame;
+                    } else if thread.frames.len() == frame.frame_idx {
+                        thread.frames.push(frame.frame);
+                    } else {
+                        unreachable!("stack frames arrived in wrong order??");
+                    }
+                }
+            }
+        }
+
         let new_processed = self.analysis_state.processed.lock().unwrap().take();
         if let Some(processed) = new_processed {
-            if self.tab == Tab::Settings {
+            if self.tab == Tab::Settings && self.cur_status <= ProcessingStatus::RawProcessing {
                 self.tab = Tab::Processed;
             }
+            self.cur_status = ProcessingStatus::Done;
             if let Ok(state) = &processed {
                 if let Some(crashed_thread) = state.requesting_thread {
                     self.processed_ui_state.cur_thread = crashed_thread;
@@ -240,13 +283,13 @@ impl eframe::App for MyApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Settings, "settings");
-                if status >= ProcessingStatus::RawProcessing {
+                if self.cur_status >= ProcessingStatus::RawProcessing {
                     ui.selectable_value(&mut self.tab, Tab::RawDump, "raw dump");
                 }
-                if status >= ProcessingStatus::Symbolicating {
+                if self.cur_status >= ProcessingStatus::Symbolicating {
                     ui.selectable_value(&mut self.tab, Tab::Processed, "processed");
                 }
-                if status >= ProcessingStatus::RawProcessing {
+                if self.cur_status >= ProcessingStatus::RawProcessing {
                     ui.selectable_value(&mut self.tab, Tab::Logs, "logs");
                 }
             });
@@ -258,7 +301,7 @@ impl eframe::App for MyApp {
                 Tab::Logs => self.update_logs(ui, ctx),
             }
         });
-        self.last_status = status;
+        self.last_status = self.cur_status;
     }
 }
 
@@ -266,6 +309,7 @@ const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 1000;
 
 impl MyApp {
     fn set_path(&mut self, path: PathBuf) {
+        self.cur_status = ProcessingStatus::ReadingDump;
         self.settings.picked_path = Some(path.display().to_string());
         let (lock, condvar) = &*self.task_sender;
         let mut new_task = lock.lock().unwrap();
@@ -277,11 +321,9 @@ impl MyApp {
     }
 
     fn process_dump(&mut self, dump: Arc<Minidump<'static, Mmap>>) {
-        if self.cur_status >= ProcessingStatus::Done {
-            self.logger.clear();
-        }
         let (lock, condvar) = &*self.task_sender;
         let mut new_task = lock.lock().unwrap();
+        self.cur_status = ProcessingStatus::RawProcessing;
 
         let symbol_paths = self
             .settings
@@ -980,10 +1022,11 @@ impl MyApp {
     }
 
     fn update_processed_good(&mut self, ui: &mut Ui, state: &ProcessState) {
-        let is_symbolicated = self.cur_status == ProcessingStatus::Done;
+        // let is_symbolicated = self.cur_status == ProcessingStatus::Done;
         StripBuilder::new(ui)
             .size(Size::relative(0.5))
-            .size(Size::relative(0.5))
+            .size(Size::remainder())
+            .size(Size::exact(18.0))
             .vertical(|mut strip| {
                 strip.cell(|ui| {
                     self.update_processed_data(ui, state);
@@ -1016,12 +1059,41 @@ impl MyApp {
                     ui.separator();
 
                     if let Some(stack) = state.threads.get(self.processed_ui_state.cur_thread) {
-                        if is_symbolicated {
-                            self.update_processed_backtrace(ui, stack);
-                        } else {
-                            ui.label("stackwalking in progress...");
-                        }
+                        self.update_processed_backtrace(ui, stack);
                     }
+                });
+                strip.cell(|ui| {
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        let stats = self.analysis_state.stats.lock().unwrap();
+                        let symbols = stats.pending_symbols.lock().unwrap().clone();
+                        let (t_done, t_todo) = *stats.threads_processed.lock().unwrap();
+                        let frames_walked = *stats.frames_processed.lock().unwrap();
+
+                        let estimated_frames_per_thread = 10.0;
+                        let estimated_progress = if t_todo == 0 {
+                            0.0
+                        } else {
+                            let ratio = frames_walked as f32
+                                / (t_todo as f32 * estimated_frames_per_thread);
+                            ratio.min(0.9)
+                        };
+                        let in_progress = self.cur_status < ProcessingStatus::Done;
+                        let progress = if in_progress { estimated_progress } else { 1.0 };
+
+                        ui.label(format!(
+                            "fetching symbols {}/{}",
+                            symbols.symbols_processed, symbols.symbols_requested
+                        ));
+                        ui.label(format!("processing threads {}/{}", t_done, t_todo));
+                        ui.label(format!("frames walked {}", frames_walked));
+
+                        let progress_bar = egui::ProgressBar::new(progress)
+                            .show_percentage()
+                            .animate(in_progress);
+
+                        ui.add(progress_bar);
+                    });
                 });
             });
     }
@@ -1261,10 +1333,11 @@ fn preview_files_being_dropped(ctx: &egui::Context) {
 }
 
 fn process_minidump(
-    _task_receiver: &Arc<(Mutex<Option<ProcessorTask>>, Condvar)>,
+    task_receiver: &Arc<(Mutex<Option<ProcessorTask>>, Condvar)>,
+    analysis_sender: &Arc<MinidumpAnalysis>,
     settings: &ProcessDump,
     symbolicate: bool,
-) -> Result<ProcessState, minidump_processor::ProcessError> {
+) -> Option<Result<ProcessState, minidump_processor::ProcessError>> {
     let (symbol_paths, symbol_urls) = if symbolicate {
         (settings.symbol_paths.clone(), settings.symbol_urls.clone())
     } else {
@@ -1281,7 +1354,14 @@ fn process_minidump(
     let timeout = std::time::Duration::from_secs(settings.http_timeout_secs);
 
     // Use ProcessorOptions for detailed configuration
-    let options = ProcessorOptions::default();
+    let mut options = ProcessorOptions::default();
+    {
+        let stats = analysis_sender.stats.lock().unwrap();
+        options.frame_stat_reporter = Some(stats.frames_processed.clone());
+        options.thread_stat_reporter = Some(stats.threads_processed.clone());
+        options.frame_reporter = Some(stats.processed_frames.clone());
+        options.partial_state_reporter = Some(stats.partial.clone());
+    }
 
     // Specify a symbol supplier (here we're using the most powerful one, the http supplier)
     let provider = Symbolizer::new(http_symbol_supplier(
@@ -1296,14 +1376,47 @@ fn process_minidump(
         .enable_all()
         .build()
         .unwrap();
-    let state = runtime.block_on(async {
+
+    let process = || async {
         let state =
             minidump_processor::process_minidump_with_options(&settings.dump, &provider, options)
                 .await;
         state
-    })?;
+    };
+    let check_status = || async {
+        loop {
+            if task_receiver.0.lock().unwrap().is_some() {
+                // Cancel processing, controller wants us doing something else
+                return;
+            }
+            // Update stats
+            *analysis_sender
+                .stats
+                .lock()
+                .unwrap()
+                .pending_symbols
+                .lock()
+                .unwrap() = provider.pending_stats();
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    };
 
-    Ok(state)
+    let state = runtime.block_on(async {
+        tokio::select! {
+            state = process() => Some(state),
+            _ = check_status() => None,
+        }
+    });
+
+    *analysis_sender
+        .stats
+        .lock()
+        .unwrap()
+        .pending_symbols
+        .lock()
+        .unwrap() = provider.pending_stats();
+
+    state
 }
 
 fn threadname(stack: &CallStack) -> String {
