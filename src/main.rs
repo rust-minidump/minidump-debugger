@@ -1,6 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
-use breakpad_symbols::PendingStats;
 use eframe::egui;
 use egui::{ComboBox, TextStyle, Ui, Vec2};
 use egui_extras::{Size, StripBuilder, TableBuilder};
@@ -8,8 +7,8 @@ use memmap2::Mmap;
 use minidump::{format::MINIDUMP_STREAM_TYPE, Minidump, Module};
 use minidump_common::utils::basename;
 use minidump_processor::{
-    http_symbol_supplier, CallStack, ProcessState, ProcessorOptions, StackFrame, Symbolizer,
-    WalkedFrame,
+    http_symbol_supplier, CallStack, PendingProcessorStatSubscriptions, PendingProcessorStats,
+    PendingSymbolStats, ProcessState, ProcessorOptions, StackFrame, Symbolizer,
 };
 use num_traits::FromPrimitive;
 use std::{
@@ -82,7 +81,7 @@ fn main() {
             }
             ProcessorTask::ProcessDump(settings) => {
                 // Reset all stats
-                *analysis_sender.stats.lock().unwrap() = ProcessingStats::default();
+                *analysis_sender.stats.lock().unwrap() = Default::default();
                 logger_handle.clear();
 
                 // Do the processing
@@ -214,13 +213,25 @@ struct MinidumpAnalysis {
     stats: Arc<Mutex<ProcessingStats>>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 struct ProcessingStats {
-    threads_processed: Arc<Mutex<(u64, u64)>>,
-    frames_processed: Arc<Mutex<u64>>,
-    processed_frames: Arc<Mutex<Vec<WalkedFrame>>>,
-    partial: Arc<Mutex<Option<ProcessState>>>,
-    pending_symbols: Arc<Mutex<PendingStats>>,
+    processor_stats: Arc<PendingProcessorStats>,
+    pending_symbols: Arc<Mutex<PendingSymbolStats>>,
+}
+
+impl Default for ProcessingStats {
+    fn default() -> Self {
+        let mut subscriptions = PendingProcessorStatSubscriptions::default();
+        subscriptions.thread_count = true;
+        subscriptions.frame_count = true;
+        subscriptions.unwalked_result = true;
+        subscriptions.live_frames = true;
+
+        Self {
+            processor_stats: Arc::new(PendingProcessorStats::new(subscriptions)),
+            pending_symbols: Default::default(),
+        }
+    }
 }
 
 impl eframe::App for MyApp {
@@ -236,7 +247,7 @@ impl eframe::App for MyApp {
 
         if self.cur_status < ProcessingStatus::Done {
             let stats = self.analysis_state.stats.lock().unwrap();
-            let partial = stats.partial.lock().unwrap().take();
+            let partial = stats.processor_stats.take_unwalked_result();
             if let Some(state) = partial {
                 if self.tab == Tab::Settings && self.cur_status <= ProcessingStatus::RawProcessing {
                     self.tab = Tab::Processed;
@@ -251,8 +262,7 @@ impl eframe::App for MyApp {
 
             if let Some(partial) = self.processed.as_mut().and_then(|p| p.as_mut().ok()) {
                 let partial = Arc::make_mut(partial);
-                let mut new_frames = stats.processed_frames.lock().unwrap();
-                for frame in new_frames.drain(..) {
+                stats.processor_stats.drain_new_frames(|frame| {
                     let thread = &mut partial.threads[frame.thread_idx];
                     if thread.frames.len() > frame.frame_idx {
                         // Allows us to overwrite the old context frame
@@ -262,7 +272,7 @@ impl eframe::App for MyApp {
                     } else {
                         unreachable!("stack frames arrived in wrong order??");
                     }
-                }
+                });
             }
         }
 
@@ -1067,8 +1077,8 @@ impl MyApp {
                     ui.horizontal(|ui| {
                         let stats = self.analysis_state.stats.lock().unwrap();
                         let symbols = stats.pending_symbols.lock().unwrap().clone();
-                        let (t_done, t_todo) = *stats.threads_processed.lock().unwrap();
-                        let frames_walked = *stats.frames_processed.lock().unwrap();
+                        let (t_done, t_todo) = stats.processor_stats.get_thread_count();
+                        let frames_walked = stats.processor_stats.get_frame_count();
 
                         let estimated_frames_per_thread = 10.0;
                         let estimated_progress = if t_todo == 0 {
@@ -1355,13 +1365,13 @@ fn process_minidump(
 
     // Use ProcessorOptions for detailed configuration
     let mut options = ProcessorOptions::default();
-    {
-        let stats = analysis_sender.stats.lock().unwrap();
-        options.frame_stat_reporter = Some(stats.frames_processed.clone());
-        options.thread_stat_reporter = Some(stats.threads_processed.clone());
-        options.frame_reporter = Some(stats.processed_frames.clone());
-        options.partial_state_reporter = Some(stats.partial.clone());
-    }
+    let stat_reporter = analysis_sender
+        .stats
+        .lock()
+        .unwrap()
+        .processor_stats
+        .clone();
+    options.stat_reporter = Some(&stat_reporter);
 
     // Specify a symbol supplier (here we're using the most powerful one, the http supplier)
     let provider = Symbolizer::new(http_symbol_supplier(
