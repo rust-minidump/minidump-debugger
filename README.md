@@ -17,20 +17,21 @@ At this point the UI is mostly at parity with [minidump-stackwalk](https://githu
 
 # Future Functionality?
 
-* log searching/sorting/filtering based on tracing spans ("give me all the info on this thread")
-* builtin hexdump viewing (we currently get some from the raw minidump printing, but it's very slow because it doesn't know where we're looking)
-* surface more random pieces of information (crash time, endianess, ...)
-* `Linux*` stream raw inspection (they have a weird format)
-* surface recovered arguments (currently only computed in the x86 backend, kinda jank)
-* steal some [socc-pair](https://github.com/Gankra/socc-pair/) features? (benching, fetching dumps, mocking symbol server, diffing)
-* allow the dump to be pointed at a build dir to compute local symbols?
+* [x] (on interactive branch) more responsive live results
+* [x] (on interactive branch) log searching/sorting/filtering based on tracing spans ("give me all the info on this thread")
+* [ ] builtin hexdump viewing (we currently get some from the raw minidump printing, but it's very slow because it doesn't know where we're looking)
+* [ ] surface more random pieces of information (crash time, endianess, ...)
+* [x] (on interactive branch) `Linux*` stream raw inspection (they have a weird format)
+* [ ] surface recovered arguments (currently only computed in the x86 backend, kinda jank)
+* [ ] steal some [socc-pair](https://github.com/Gankra/socc-pair/) features? (benching, fetching dumps, mocking symbol server, diffing)
+* [ ] allow the dump to be pointed at a build dir to compute local symbols?
 
 # Future Cleanups?
 
-* properly expand table row-heights for line-wrapping items
-* better pointer-sized-value formatting (pad 64-bit to 16 chars)
-* make more text selectable (bare labels suck for most of what we display)
-* don't make the `symbol cache` checkbox so terribly dangerous (will blindly delete the dir at that path, should just disable the cache)
+* [ ] properly expand table row-heights for line-wrapping items
+* [ ] better pointer-sized-value formatting (pad 64-bit to 16 chars)
+* [ ] make more text selectable (bare labels suck for most of what we display)
+* [ ] don't make the `symbol cache` checkbox so terribly dangerous (will blindly delete the dir at that path, should just disable the cache)
 
 # Screenshots
 
