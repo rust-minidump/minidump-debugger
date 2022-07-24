@@ -1026,29 +1026,32 @@ impl MyApp {
                     self.update_processed_data(ui, state);
                 });
                 strip.cell(|ui| {
-                    ComboBox::from_label("Thread")
-                        .width(400.0)
-                        .selected_text(
-                            state
-                                .threads
-                                .get(self.processed_ui_state.cur_thread)
-                                .map(threadname)
-                                .unwrap_or_default(),
-                        )
-                        .show_ui(ui, |ui| {
-                            for (idx, stack) in state.threads.iter().enumerate() {
-                                if ui
-                                    .selectable_value(
-                                        &mut self.processed_ui_state.cur_thread,
-                                        idx,
-                                        threadname(stack),
-                                    )
-                                    .changed()
-                                {
-                                    self.processed_ui_state.cur_frame = 0;
-                                };
-                            }
-                        });
+                    ui.horizontal(|ui| {
+                        ui.label("Thread: ");
+                        ComboBox::from_label("  ")
+                            .width(400.0)
+                            .selected_text(
+                                state
+                                    .threads
+                                    .get(self.processed_ui_state.cur_thread)
+                                    .map(threadname)
+                                    .unwrap_or_default(),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (idx, stack) in state.threads.iter().enumerate() {
+                                    if ui
+                                        .selectable_value(
+                                            &mut self.processed_ui_state.cur_thread,
+                                            idx,
+                                            threadname(stack),
+                                        )
+                                        .changed()
+                                    {
+                                        self.processed_ui_state.cur_frame = 0;
+                                    };
+                                }
+                            });
+                    });
 
                     ui.separator();
 
@@ -1261,65 +1264,70 @@ impl MyApp {
     fn update_logs(&mut self, ui: &mut Ui, _ctx: &egui::Context) {
         let ui_state = &mut self.log_ui_state;
         if let Some(Ok(state)) = &self.processed {
-            ComboBox::from_label("Thread")
-                .width(400.0)
-                .selected_text(
-                    ui_state
-                        .cur_thread
-                        .and_then(|thread| state.threads.get(thread).map(threadname))
-                        .unwrap_or_default(),
-                )
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_value(&mut ui_state.cur_thread, None, "")
-                        .changed()
-                    {
-                        ui_state.cur_frame = None;
-                    };
-                    for (idx, stack) in state.threads.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label("Thread: ");
+                ComboBox::from_label(" ")
+                    .width(400.0)
+                    .selected_text(
+                        ui_state
+                            .cur_thread
+                            .and_then(|thread| state.threads.get(thread).map(threadname))
+                            .unwrap_or_else(|| "<no thread>".to_owned()),
+                    )
+                    .show_ui(ui, |ui| {
                         if ui
-                            .selectable_value(
-                                &mut ui_state.cur_thread,
-                                Some(idx),
-                                threadname(stack),
-                            )
+                            .selectable_value(&mut ui_state.cur_thread, None, "<no thread>")
                             .changed()
                         {
                             ui_state.cur_frame = None;
                         };
-                    }
-                });
-            let thread = ui_state.cur_thread.and_then(|t| state.threads.get(t));
-            if let Some(thread) = thread {
-                ComboBox::from_label("Frame")
-                    .width(100.0)
-                    .selected_text(
-                        ui_state
-                            .cur_frame
-                            .map(|f| f.to_string())
-                            .unwrap_or_default(),
-                    )
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut ui_state.cur_frame, None, "");
-                        for (idx, _stack) in thread.frames.iter().enumerate() {
-                            ui.selectable_value(
-                                &mut ui_state.cur_frame,
-                                Some(idx),
-                                idx.to_string(),
-                            );
+                        for (idx, stack) in state.threads.iter().enumerate() {
+                            if ui
+                                .selectable_value(
+                                    &mut ui_state.cur_thread,
+                                    Some(idx),
+                                    threadname(stack),
+                                )
+                                .changed()
+                            {
+                                ui_state.cur_frame = None;
+                            };
                         }
                     });
-            }
+                let thread = ui_state.cur_thread.and_then(|t| state.threads.get(t));
+                if let Some(thread) = thread {
+                    ui.label("Frame: ");
+                    ComboBox::from_label("")
+                        .width(400.0)
+                        .selected_text(frame_signature_from_indices(
+                            state,
+                            ui_state.cur_thread,
+                            ui_state.cur_frame,
+                        ))
+                        .show_ui(ui, |ui| {
+                            let no_name =
+                                frame_signature_from_indices(state, ui_state.cur_thread, None);
+                            ui.selectable_value(&mut ui_state.cur_frame, None, no_name);
+                            for (idx, _stack) in thread.frames.iter().enumerate() {
+                                let name = frame_signature_from_indices(
+                                    state,
+                                    ui_state.cur_thread,
+                                    Some(idx),
+                                );
+                                ui.selectable_value(&mut ui_state.cur_frame, Some(idx), name);
+                            }
+                        });
+                }
+            });
         }
 
         // Print the logs
         egui::ScrollArea::vertical().show(ui, |ui| {
-            let span_to_print = match (ui_state.cur_thread, ui_state.cur_frame) {
-                (Some(t), Some(f)) => self.logger.id_for_frame(t, f),
-                (Some(t), None) => self.logger.id_for_thread(t),
-                _ => None,
+            let text = match (ui_state.cur_thread, ui_state.cur_frame) {
+                (Some(t), Some(f)) => self.logger.string_for_frame(t, f),
+                (Some(t), None) => self.logger.string_for_thread(t),
+                _ => self.logger.string_for_all(),
             };
-            let text = self.logger.string(span_to_print);
             ui.add(
                 egui::TextEdit::multiline(&mut &**text)
                     .font(TextStyle::Monospace)
@@ -1523,6 +1531,35 @@ fn frame_source(f: &mut impl std::fmt::Write, frame: &StackFrame) -> Result<(), 
         }
     }
     Ok(())
+}
+
+fn frame_signature_from_indices(
+    state: &ProcessState,
+    thread_idx: Option<usize>,
+    frame_idx: Option<usize>,
+) -> String {
+    use std::fmt::Write;
+    fn frame_signature_from_indices_inner(
+        buf: &mut String,
+        state: &ProcessState,
+        thread_idx: Option<usize>,
+        frame_idx: Option<usize>,
+    ) -> Option<()> {
+        let thread_idx = thread_idx?;
+        let frame_idx = frame_idx?;
+        let thread = state.threads.get(thread_idx)?;
+        let frame = thread.frames.get(frame_idx)?;
+        frame_signature(buf, frame).ok()?;
+        Some(())
+    }
+
+    if frame_idx.is_none() {
+        return "<no frame>".to_owned();
+    }
+    let mut buf = String::new();
+    write!(&mut buf, "{}: ", frame_idx.unwrap()).unwrap();
+    let _ = frame_signature_from_indices_inner(&mut buf, state, thread_idx, frame_idx);
+    buf
 }
 
 fn frame_signature(
