@@ -527,15 +527,19 @@ impl MyApp {
                                     self.update_raw_dump_unloaded_module_list(ui, dump)
                                 }
                                 MemoryListStream => self.update_raw_dump_memory_list(ui, dump),
+                                Memory64ListStream => self.update_raw_dump_memory_64_list(ui, dump),
                                 MemoryInfoListStream => {
                                     self.update_raw_dump_memory_info_list(ui, dump)
                                 }
-                                /*
+                                LinuxMaps => self.update_raw_dump_linux_maps(ui, dump),
+                                LinuxCmdLine => self.update_raw_dump_linux_cmd_line(ui, dump),
                                 LinuxCpuInfo => self.update_raw_dump_linux_cpu_info(ui, dump),
                                 LinuxEnviron => self.update_raw_dump_linux_environ(ui, dump),
                                 LinuxLsbRelease => self.update_raw_dump_linux_lsb_release(ui, dump),
-                                MozMacosCrashInfoStream => self.update_raw_dump_moz_macos_crash_info(ui, dump),
-                                */
+                                LinuxProcStatus => self.update_raw_dump_linux_proc_status(ui, dump),
+                                MozMacosCrashInfoStream => {
+                                    self.update_raw_dump_moz_macos_crash_info(ui, dump)
+                                }
                                 _ => {}
                             }
                         }
@@ -553,21 +557,30 @@ impl MyApp {
             use MINIDUMP_STREAM_TYPE::*;
             let (supported, label) =
                 if let Some(stream_type) = MINIDUMP_STREAM_TYPE::from_u32(stream.stream_type) {
-                    let supported = match stream_type {
+                    let supported = matches!(
+                        stream_type,
                         SystemInfoStream
-                        | MiscInfoStream
-                        | ThreadNamesStream
-                        | ThreadListStream
-                        | AssertionInfoStream
-                        | BreakpadInfoStream
-                        | CrashpadInfoStream
-                        | ExceptionStream
-                        | ModuleListStream
-                        | UnloadedModuleListStream
-                        | MemoryListStream
-                        | MemoryInfoListStream => true,
-                        _ => false,
-                    };
+                            | MiscInfoStream
+                            | ThreadNamesStream
+                            | ThreadListStream
+                            | AssertionInfoStream
+                            | BreakpadInfoStream
+                            | CrashpadInfoStream
+                            | ExceptionStream
+                            | ModuleListStream
+                            | UnloadedModuleListStream
+                            | MemoryListStream
+                            | Memory64ListStream
+                            | MemoryInfoListStream
+                            | MozMacosCrashInfoStream
+                            | LinuxCmdLine
+                            | LinuxMaps
+                            | LinuxCpuInfo
+                            | LinuxEnviron
+                            | LinuxLsbRelease
+                            | LinuxProcStatus
+                    );
+
                     (supported, format!("{:?}", stream_type))
                 } else {
                     (false, "<unknown>".to_string())
@@ -629,21 +642,29 @@ impl MyApp {
                             let (supported, label) = if let Some(stream_type) =
                                 MINIDUMP_STREAM_TYPE::from_u32(stream.stream_type)
                             {
-                                let supported = match stream_type {
+                                let supported = matches!(
+                                    stream_type,
                                     SystemInfoStream
-                                    | MiscInfoStream
-                                    | ThreadNamesStream
-                                    | ThreadListStream
-                                    | AssertionInfoStream
-                                    | BreakpadInfoStream
-                                    | CrashpadInfoStream
-                                    | ExceptionStream
-                                    | ModuleListStream
-                                    | UnloadedModuleListStream
-                                    | MemoryListStream
-                                    | MemoryInfoListStream => true,
-                                    _ => false,
-                                };
+                                        | MiscInfoStream
+                                        | ThreadNamesStream
+                                        | ThreadListStream
+                                        | AssertionInfoStream
+                                        | BreakpadInfoStream
+                                        | CrashpadInfoStream
+                                        | ExceptionStream
+                                        | ModuleListStream
+                                        | UnloadedModuleListStream
+                                        | MemoryListStream
+                                        | Memory64ListStream
+                                        | MemoryInfoListStream
+                                        | MozMacosCrashInfoStream
+                                        | LinuxCmdLine
+                                        | LinuxMaps
+                                        | LinuxCpuInfo
+                                        | LinuxEnviron
+                                        | LinuxLsbRelease
+                                        | LinuxProcStatus
+                                );
                                 (supported, format!("{:?}", stream_type))
                             } else {
                                 (false, "<unknown>".to_string())
@@ -677,6 +698,24 @@ impl MyApp {
 
     fn update_raw_dump_misc_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
         let stream = dump.get_stream::<minidump::MinidumpMiscInfo>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        let mut bytes = Vec::new();
+        stream.print(&mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.add(
+            egui::TextEdit::multiline(&mut &*text)
+                .font(TextStyle::Monospace)
+                .desired_width(f32::INFINITY),
+        );
+    }
+
+    fn update_raw_dump_moz_macos_crash_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_stream::<minidump::MinidumpMacCrashInfo>();
         if let Err(e) = &stream {
             ui.label("Failed to read stream");
             ui.label(e.to_string());
@@ -855,16 +894,15 @@ impl MyApp {
             return;
         }
         let stream = stream.unwrap();
-        ui.horizontal_wrapped(|ui| {
-            let mut bytes = Vec::new();
-            stream.print(&mut bytes).unwrap();
-            let text = String::from_utf8(bytes).unwrap();
-            ui.add(
-                egui::TextEdit::multiline(&mut &*text)
-                    .font(TextStyle::Monospace)
-                    .desired_width(f32::INFINITY),
-            );
-        });
+
+        let mut bytes = Vec::new();
+        stream.print(&mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.add(
+            egui::TextEdit::multiline(&mut &*text)
+                .font(TextStyle::Monospace)
+                .desired_width(f32::INFINITY),
+        );
     }
 
     fn update_raw_dump_unloaded_module_list(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
@@ -875,16 +913,15 @@ impl MyApp {
             return;
         }
         let stream = stream.unwrap();
-        ui.horizontal_wrapped(|ui| {
-            let mut bytes = Vec::new();
-            stream.print(&mut bytes).unwrap();
-            let text = String::from_utf8(bytes).unwrap();
-            ui.add(
-                egui::TextEdit::multiline(&mut &*text)
-                    .font(TextStyle::Monospace)
-                    .desired_width(f32::INFINITY),
-            );
-        });
+
+        let mut bytes = Vec::new();
+        stream.print(&mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.add(
+            egui::TextEdit::multiline(&mut &*text)
+                .font(TextStyle::Monospace)
+                .desired_width(f32::INFINITY),
+        );
     }
 
     fn update_raw_dump_memory_list(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
@@ -896,16 +933,34 @@ impl MyApp {
             return;
         }
         let stream = stream.unwrap();
-        ui.horizontal_wrapped(|ui| {
-            let mut bytes = Vec::new();
-            stream.print(&mut bytes, brief).unwrap();
-            let text = String::from_utf8(bytes).unwrap();
-            ui.add(
-                egui::TextEdit::multiline(&mut &*text)
-                    .font(TextStyle::Monospace)
-                    .desired_width(f32::INFINITY),
-            );
-        });
+
+        let mut bytes = Vec::new();
+        stream.print(&mut bytes, brief).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.add(
+            egui::TextEdit::multiline(&mut &*text)
+                .font(TextStyle::Monospace)
+                .desired_width(f32::INFINITY),
+        );
+    }
+    fn update_raw_dump_memory_64_list(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let brief = self.settings.raw_dump_brief;
+        let stream = dump.get_stream::<minidump::MinidumpMemory64List>();
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+
+        let mut bytes = Vec::new();
+        stream.print(&mut bytes, brief).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.add(
+            egui::TextEdit::multiline(&mut &*text)
+                .font(TextStyle::Monospace)
+                .desired_width(f32::INFINITY),
+        );
     }
 
     fn update_raw_dump_memory_info_list(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
@@ -927,74 +982,90 @@ impl MyApp {
             );
         });
     }
-    /*
-       fn update_raw_dump_linux_cpu_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
-           let stream = dump.get_stream::<minidump::MinidumpLinuxCpuInfo>();
-           if let Err(e) = &stream {
-               ui.label("Failed to read stream");
-               ui.label(e.to_string());
-               return;
-           }
-           let stream = stream.unwrap();
-           ui.horizontal_wrapped(|ui| {
-               let mut bytes = Vec::new();
-               for (k, v) in stream.iter() {
 
-               }
-               stream.print(&mut bytes).unwrap();
-               let text = String::from_utf8(bytes).unwrap();
-               ui.monospace(text);
-           });
-       }
+    fn update_raw_dump_linux_cpu_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_raw_stream(MINIDUMP_STREAM_TYPE::LinuxCpuInfo as u32);
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        let mut bytes = Vec::new();
+        print_raw_stream("LinuxCpuInfo", stream, &mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.monospace(text);
+    }
 
-       fn update_raw_dump_linux_environ(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
-           let stream = dump.get_stream::<minidump::MinidumpLinuxEnviron>();
-           if let Err(e) = &stream {
-               ui.label("Failed to read stream");
-               ui.label(e.to_string());
-               return;
-           }
-           let stream = stream.unwrap();
-           ui.horizontal_wrapped(|ui| {
-               let mut bytes = Vec::new();
-               stream.print(&mut bytes).unwrap();
-               let text = String::from_utf8(bytes).unwrap();
-               ui.monospace(text);
-           });
-       }
+    fn update_raw_dump_linux_proc_status(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_raw_stream(MINIDUMP_STREAM_TYPE::LinuxProcStatus as u32);
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        let mut bytes = Vec::new();
+        print_raw_stream("LinuxProcStatus", stream, &mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.monospace(text);
+    }
 
-       fn update_raw_dump_linux_lsb_release(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
-           let stream = dump.get_stream::<minidump::MinidumpLinuxLsbRelease>();
-           if let Err(e) = &stream {
-               ui.label("Failed to read stream");
-               ui.label(e.to_string());
-               return;
-           }
-           let stream = stream.unwrap();
-           ui.horizontal_wrapped(|ui| {
-               let mut bytes = Vec::new();
-               stream.print(&mut bytes).unwrap();
-               let text = String::from_utf8(bytes).unwrap();
-               ui.monospace(text);
-           });
-       }
+    fn update_raw_dump_linux_maps(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_raw_stream(MINIDUMP_STREAM_TYPE::LinuxMaps as u32);
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        let mut bytes = Vec::new();
+        print_raw_stream("LinuxMaps", stream, &mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.monospace(text);
+    }
 
-       fn update_raw_dump_moz_macos_crash_info(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
-           let stream = dump.get_stream::<minidump::MinidumpMacCrashInfo>();
-           if let Err(e) = &stream {
-               ui.label("Failed to read stream");
-               ui.label(e.to_string());
-               return;
-           }
-           let stream = stream.unwrap();
-           ui.horizontal_wrapped(|ui| {
-               let mut bytes = Vec::new();
-               stream.print(&mut bytes).unwrap();
-               let text = String::from_utf8(bytes).unwrap();
-               ui.monospace(text);
-           });
-       }
-    */
+    fn update_raw_dump_linux_cmd_line(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_raw_stream(MINIDUMP_STREAM_TYPE::LinuxCmdLine as u32);
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        let mut bytes = Vec::new();
+        print_raw_stream("LinuxCmdLine", stream, &mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.monospace(text);
+    }
+
+    fn update_raw_dump_linux_lsb_release(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_raw_stream(MINIDUMP_STREAM_TYPE::LinuxLsbRelease as u32);
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        let mut bytes = Vec::new();
+        print_raw_stream("LinuxLsbRelease", stream, &mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.monospace(text);
+    }
+
+    fn update_raw_dump_linux_environ(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
+        let stream = dump.get_raw_stream(MINIDUMP_STREAM_TYPE::LinuxEnviron as u32);
+        if let Err(e) = &stream {
+            ui.label("Failed to read stream");
+            ui.label(e.to_string());
+            return;
+        }
+        let stream = stream.unwrap();
+        let mut bytes = Vec::new();
+        print_raw_stream("LinuxEnviron", stream, &mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        ui.monospace(text);
+    }
 
     fn update_processed(&mut self, ui: &mut Ui, _ctx: &egui::Context) {
         if let Some(Err(e)) = &self.minidump {
@@ -1335,6 +1406,20 @@ impl MyApp {
             );
         });
     }
+}
+
+fn print_raw_stream<T: std::io::Write>(
+    name: &str,
+    contents: &[u8],
+    out: &mut T,
+) -> std::io::Result<()> {
+    writeln!(out, "Stream {}:", name)?;
+    let s = contents
+        .split(|&v| v == 0)
+        .map(String::from_utf8_lossy)
+        .collect::<Vec<_>>()
+        .join("\\0\n");
+    write!(out, "{}\n\n", s)
 }
 
 fn listing(ui: &mut Ui, id: u64, items: impl IntoIterator<Item = (String, String)>) {
