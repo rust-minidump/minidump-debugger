@@ -1,5 +1,8 @@
 # minidump-debugger
 
+[![crates.io](https://img.shields.io/crates/v/minidump-debugger.svg)](https://crates.io/crates/minidump-debugger) ![Rust CI](https://github.com/Gankra/minidump-debugger/workflows/Rust/badge.svg?branch=main)
+
+
 An experimental GUI for [rust-minidump](https://github.com/rust-minidump/rust-minidump) based on [egui](https://www.egui.rs/).
 
 # Functionality
