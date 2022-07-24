@@ -189,6 +189,7 @@ dependencies = [
 [[package]]
 name = "breakpad-symbols"
 version = "0.12.0"
+source = "git+https://github.com/Gankra/rust-minidump?branch=interactive#a162f91c3e06998e99dfbe75a41660375d0cd30e"
 dependencies = [
  "async-trait",
  "circular",
@@ -1672,6 +1673,7 @@ checksum = "2a60c7ce501c71e03a9c9c0d35b861413ae925bd979cc7a4e30d060069aaac8d"
 [[package]]
 name = "minidump"
 version = "0.12.0"
+source = "git+https://github.com/Gankra/rust-minidump?branch=interactive#a162f91c3e06998e99dfbe75a41660375d0cd30e"
 dependencies = [
  "debugid 0.8.0",
  "encoding",
@@ -1689,6 +1691,7 @@ dependencies = [
 [[package]]
 name = "minidump-common"
 version = "0.12.0"
+source = "git+https://github.com/Gankra/rust-minidump?branch=interactive#a162f91c3e06998e99dfbe75a41660375d0cd30e"
 dependencies = [
  "bitflags",
  "debugid 0.8.0",
@@ -1702,7 +1705,7 @@ dependencies = [
 
 [[package]]
 name = "minidump-debugger"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "breakpad-symbols",
  "eframe",
@@ -1724,6 +1727,7 @@ dependencies = [
 [[package]]
 name = "minidump-processor"
 version = "0.12.0"
+source = "git+https://github.com/Gankra/rust-minidump?branch=interactive#a162f91c3e06998e99dfbe75a41660375d0cd30e"
 dependencies = [
  "async-trait",
  "breakpad-symbols",
