@@ -4,7 +4,7 @@
 
 An experimental GUI for [rust-minidump](https://github.com/rust-minidump/rust-minidump) based on [egui](https://www.egui.rs/).
 
-**NOTE**: if building from source on linux, you may need to install [the packages egui depends on](https://github.com/emilk/egui/tree/master/egui_glow).
+**NOTE**: if building from source on linux, you may need to install [the packages egui depends on](https://github.com/emilk/egui#demo).
 
 # Functionality
 
