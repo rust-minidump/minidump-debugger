@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
+use clap::Parser;
 use eframe::egui;
 use egui::{Ui, Vec2};
 use egui_extras::{Size, TableBuilder};
@@ -45,6 +46,7 @@ struct MyApp {
 }
 
 struct Settings {
+    available_paths: Vec<PathBuf>,
     picked_path: Option<String>,
     symbol_paths: Vec<(String, bool)>,
     symbol_urls: Vec<(String, bool)>,
@@ -61,9 +63,39 @@ enum Tab {
     Logs,
 }
 
+#[derive(Parser)]
+struct Cli {
+    #[clap(action, long)]
+    symbols_url: Vec<String>,
+    #[clap(action, long)]
+    symbols_path: Vec<String>,
+    #[clap(action)]
+    minidumps: Vec<PathBuf>,
+}
+
 const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 1000;
 
 fn main() {
+    let cli = Cli::parse();
+    let available_paths = cli.minidumps;
+    let symbol_paths = if cli.symbols_path.is_empty() {
+        vec![(String::new(), true)]
+    } else {
+        cli.symbols_path.into_iter().map(|p| (p, true)).collect()
+    };
+    let symbol_urls = if cli.symbols_url.is_empty() {
+        vec![
+            ("https://symbols.mozilla.org/".to_string(), true),
+            (
+                "https://msdl.microsoft.com/download/symbols/".to_string(),
+                false,
+            ),
+            (String::new(), true),
+        ]
+    } else {
+        cli.symbols_url.into_iter().map(|p| (p, true)).collect()
+    };
+
     let logger = MapLogger::new();
 
     tracing_subscriber::registry().with(logger.clone()).init();
@@ -93,17 +125,11 @@ fn main() {
                 logger,
                 tab: Tab::Settings,
                 settings: Settings {
+                    available_paths,
                     picked_path: None,
                     raw_dump_brief: true,
-                    symbol_urls: vec![
-                        ("https://symbols.mozilla.org/".to_string(), true),
-                        (
-                            "https://msdl.microsoft.com/download/symbols/".to_string(),
-                            false,
-                        ),
-                        (String::new(), true),
-                    ],
-                    symbol_paths: vec![(String::new(), true)],
+                    symbol_urls,
+                    symbol_paths,
                     symbol_cache: (
                         std::env::temp_dir()
                             .join("minidump-cache")
@@ -202,7 +228,8 @@ impl MyApp {
         }
     }
 
-    fn set_path(&mut self, path: PathBuf) {
+    fn set_path(&mut self, idx: usize) {
+        let path = self.settings.available_paths[idx].clone();
         self.cur_status = ProcessingStatus::ReadingDump;
         self.settings.picked_path = Some(path.display().to_string());
         let (lock, condvar) = &*self.task_sender;

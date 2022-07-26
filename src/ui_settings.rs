@@ -17,6 +17,20 @@ impl MyApp {
             ProcessingStatus::Done => "Minidump processed!",
         };
 
+        // Show a listing of currently known minidumps to inspect
+        let mut do_set_path = None;
+        for (i, path) in self.settings.available_paths.iter().enumerate() {
+            if ui
+                .button(&*path.file_name().unwrap().to_string_lossy())
+                .clicked()
+            {
+                do_set_path = Some(i);
+            }
+        }
+        if let Some(i) = do_set_path {
+            self.set_path(i);
+        }
+        ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.label(message);
 
@@ -39,21 +53,26 @@ impl MyApp {
             });
         });
 
+        ui.add_space(10.0);
+
         if ui.button("Open file...").clicked() {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("minidump", &["dmp"])
                 .pick_file()
             {
-                self.set_path(path);
+                self.settings.available_paths.push(path);
+                self.set_path(self.settings.available_paths.len() - 1);
             }
         }
 
+        /*
         if let Some(picked_path) = &self.settings.picked_path {
             ui.horizontal(|ui| {
                 ui.label("Picked file:");
                 ui.monospace(picked_path);
             });
         }
+        */
         ui.add_space(60.0);
         ui.separator();
         ui.heading("symbol servers");
@@ -116,10 +135,15 @@ impl MyApp {
         preview_files_being_dropped(ctx);
 
         // Collect dropped files:
-        if let Some(dropped) = ctx.input().raw.dropped_files.get(0) {
-            if let Some(path) = &dropped.path {
-                self.set_path(path.clone());
+        let mut pushed_path = false;
+        for file in &ctx.input().raw.dropped_files {
+            if let Some(path) = &file.path {
+                pushed_path = true;
+                self.settings.available_paths.push(path.clone());
             }
+        }
+        if pushed_path {
+            self.set_path(self.settings.available_paths.len() - 1);
         }
     }
 }
