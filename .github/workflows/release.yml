@@ -69,12 +69,12 @@ jobs:
       RUST_BACKTRACE: 1
     strategy:
       matrix:
-        build: [macos, win-msvc]
+        build: [macos, win-msvc, linux]
         include:
-        # - build: linux
-        #  os: ubuntu-18.04
-        #  rust: nightly
-        #  target: x86_64-unknown-linux-musl
+        - build: linux
+          os: ubuntu-18.04
+          rust: nightly
+          target: x86_64-unknown-linux-musl
         - build: macos
           os: macos-latest
           rust: nightly
