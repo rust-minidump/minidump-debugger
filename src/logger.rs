@@ -179,7 +179,7 @@ impl MapLogger {
                 return string.clone();
             }
         }
-        log.last_query = Some(query.clone());
+        log.last_query = Some(query);
 
         let mut output = String::new();
 
@@ -251,7 +251,7 @@ impl MapLogger {
             }
         };
 
-        print_span_recursive(&mut output, &log.sub_spans, 0, &span_to_print, range);
+        print_span_recursive(&mut output, &log.sub_spans, 0, span_to_print, range);
 
         let result = Arc::new(output);
         log.cur_string = Some(result.clone());
@@ -284,8 +284,8 @@ where
 
         // Store the message in the span
         cur_span.events.push(EventEntry::Message(MessageEntry {
-            level: event.metadata().level().clone(),
-            fields: fields,
+            level: *event.metadata().level(),
+            fields,
         }));
     }
 
@@ -367,7 +367,7 @@ where
         let mut visitor = MapVisitor(&mut new_fields);
         values.record(&mut visitor);
 
-        let span_id = log.live_spans[&id];
+        let span_id = log.live_spans[id];
         log.sub_spans
             .get_mut(&span_id)
             .unwrap()
