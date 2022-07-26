@@ -103,12 +103,11 @@ jobs:
       with:
         toolchain: ${{ matrix.rust }}
         target: ${{ matrix.target }}
-
-    - name: Use Cross
+    - name: Use Normal As Hell Cargo
       shell: bash
       run: |
-        cargo install cross
-        echo "CARGO=cross" >> $GITHUB_ENV
+        #    cargo install cross
+        echo "CARGO=cargo" >> $GITHUB_ENV
         echo "TARGET_FLAGS=--target ${{ matrix.target }}" >> $GITHUB_ENV
         echo "TARGET_DIR=./target/${{ matrix.target }}" >> $GITHUB_ENV
     - name: Show command used for Cargo
