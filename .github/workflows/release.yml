@@ -52,7 +52,7 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_VERSION }}
           release_name: ${{ env.RELEASE_VERSION }}
-          prerelease: contains(${{ env.RELEASE_VERSION }}, "-prerelease")
+          prerelease: contains(env.RELEASE_VERSION, "-prerelease")
 
   build-release:
     name: build-release
@@ -94,7 +94,7 @@ jobs:
     - name: Install packages (Ubuntu)
       if: matrix.os == 'ubuntu-20.04'
       run: |
-        sudo apt-get install -y libclang-dev libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev libglib2.0-dev
+        sudo apt-get install -y libclang-dev libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev libglib2.0-dev libglib2.0
     # - name: Install packages (macOS)
     #  if: matrix.os == 'macos-latest'
     #  run: |
