@@ -324,7 +324,7 @@ impl MyApp {
                 if let (Some(source_file), Some(line)) =
                     (frame.source_file_name.as_ref(), frame.source_line.as_ref())
                 {
-                    ui.label(format!("{source_file}: {line}"));
+                    ui.label(format!("{}: {line}", basename(source_file)));
                 }
             });
             row.col(|ui| {
