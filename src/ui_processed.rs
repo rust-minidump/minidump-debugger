@@ -2,9 +2,9 @@ use crate::processor::ProcessingStatus;
 use crate::{MyApp, Tab};
 use eframe::egui;
 use egui::{ComboBox, Ui};
-use egui_extras::{Size, StripBuilder, TableBuilder};
+use egui_extras::{Size, StripBuilder, TableBody, TableBuilder};
 use minidump_common::utils::basename;
-use minidump_processor::{CallStack, ProcessState};
+use minidump_processor::{CallStack, InlineFrame, ProcessState, StackFrame};
 
 pub struct ProcessedUiState {
     pub cur_thread: usize,
@@ -222,58 +222,114 @@ impl MyApp {
                 });
             })
             .body(|mut body| {
-                for (i, frame) in stack.frames.iter().enumerate() {
-                    let is_thick = false; // thick_row(row_index);
-                    let row_height = if is_thick { 30.0 } else { 18.0 };
+                let mut frame_count = 0;
+                for (frame_idx, frame) in stack.frames.iter().enumerate() {
+                    let frame_num = frame_count;
+                    frame_count += 1;
+                    self.ui_real_frame(&mut body, frame_idx, frame_num, frame);
 
-                    body.row(row_height, |mut row| {
-                        row.col(|ui| {
-                            ui.centered_and_justified(|ui| {
-                                if ui.link(i.to_string()).clicked() {
-                                    self.processed_ui_state.cur_frame = i;
-                                }
-                            });
-                        });
-                        row.col(|ui| {
-                            let trust = match frame.trust {
-                                minidump_processor::FrameTrust::None => "none",
-                                minidump_processor::FrameTrust::Scan => "scan",
-                                minidump_processor::FrameTrust::CfiScan => "cfi scan",
-                                minidump_processor::FrameTrust::FramePointer => "frame pointer",
-                                minidump_processor::FrameTrust::CallFrameInfo => "cfi",
-                                minidump_processor::FrameTrust::PreWalked => "prewalked",
-                                minidump_processor::FrameTrust::Context => "context",
-                            };
-                            ui.centered_and_justified(|ui| {
-                                if ui.link(trust).clicked() {
-                                    self.tab = Tab::Logs;
-                                    self.log_ui_state.cur_thread =
-                                        Some(self.processed_ui_state.cur_thread);
-                                    self.log_ui_state.cur_frame = Some(i);
-                                }
-                            });
-                        });
-                        row.col(|ui| {
-                            if let Some(module) = &frame.module {
-                                ui.centered_and_justified(|ui| {
-                                    ui.label(basename(&module.name));
-                                });
-                            }
-                        });
-                        row.col(|ui| {
-                            let mut label = String::new();
-                            crate::frame_source(&mut label, frame).unwrap();
-                            // ui.style_mut().wrap = Some(false);
-                            ui.label(label);
-                        });
-                        row.col(|ui| {
-                            let mut label = String::new();
-                            crate::frame_signature(&mut label, frame).unwrap();
-                            // ui.style_mut().wrap = Some(false);
-                            ui.label(label);
-                        });
+                    for inline in frame.inlines.iter().rev() {
+                        let frame_num = frame_count;
+                        frame_count += 1;
+                        self.ui_inline_frame(&mut body, frame_num, frame, inline);
+                    }
+                }
+            });
+    }
+
+    fn ui_real_frame(
+        &mut self,
+        body: &mut TableBody,
+        frame_idx: usize,
+        frame_num: usize,
+        frame: &StackFrame,
+    ) {
+        let row_height = 18.0;
+
+        body.row(row_height, |mut row| {
+            row.col(|ui| {
+                ui.centered_and_justified(|ui| {
+                    if ui.link(frame_num.to_string()).clicked() {
+                        self.processed_ui_state.cur_frame = frame_idx;
+                    }
+                });
+            });
+            row.col(|ui| {
+                let trust = match frame.trust {
+                    minidump_processor::FrameTrust::None => "none",
+                    minidump_processor::FrameTrust::Scan => "scan",
+                    minidump_processor::FrameTrust::CfiScan => "cfi scan",
+                    minidump_processor::FrameTrust::FramePointer => "frame pointer",
+                    minidump_processor::FrameTrust::CallFrameInfo => "cfi",
+                    minidump_processor::FrameTrust::PreWalked => "prewalked",
+                    minidump_processor::FrameTrust::Context => "context",
+                };
+                ui.centered_and_justified(|ui| {
+                    if ui.link(trust).clicked() {
+                        self.tab = Tab::Logs;
+                        self.log_ui_state.cur_thread = Some(self.processed_ui_state.cur_thread);
+                        self.log_ui_state.cur_frame = Some(frame_idx);
+                    }
+                });
+            });
+            row.col(|ui| {
+                if let Some(module) = &frame.module {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(basename(&module.name));
                     });
                 }
             });
+            row.col(|ui| {
+                let mut label = String::new();
+                crate::frame_source(&mut label, frame).unwrap();
+                ui.label(label);
+            });
+            row.col(|ui| {
+                let mut label = String::new();
+                crate::frame_signature(&mut label, frame).unwrap();
+                ui.label(label);
+            });
+        });
+    }
+
+    fn ui_inline_frame(
+        &mut self,
+        body: &mut TableBody,
+        frame_num: usize,
+        real_frame: &StackFrame,
+        frame: &InlineFrame,
+    ) {
+        let row_height = 18.0;
+
+        body.row(row_height, |mut row| {
+            row.col(|ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.label(frame_num.to_string());
+                });
+            });
+            row.col(|ui| {
+                let trust = "inlined";
+                ui.centered_and_justified(|ui| {
+                    ui.label(trust);
+                });
+            });
+            row.col(|ui| {
+                if let Some(module) = &real_frame.module {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(basename(&module.name));
+                    });
+                }
+            });
+            row.col(|ui| {
+                if let (Some(source_file), Some(line)) =
+                    (frame.source_file_name.as_ref(), frame.source_line.as_ref())
+                {
+                    ui.label(format!("{source_file}: {line}"));
+                }
+            });
+            row.col(|ui| {
+                ui.label(&frame.function_name);
+            });
+        });
     }
 }

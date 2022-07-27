@@ -382,7 +382,7 @@ fn frame_source(f: &mut impl std::fmt::Write, frame: &StackFrame) -> Result<(), 
             &frame.source_line,
             &frame.source_line_base,
         ) {
-            write!(f, "{} : {}", sourcename(source_file), source_line,)?;
+            write!(f, "{}: {}", sourcename(source_file), source_line,)?;
         } else if let Some(function_base) = frame.function_base {
             write!(
                 f,
