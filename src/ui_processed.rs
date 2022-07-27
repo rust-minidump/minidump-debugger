@@ -224,15 +224,15 @@ impl MyApp {
             .body(|mut body| {
                 let mut frame_count = 0;
                 for (frame_idx, frame) in stack.frames.iter().enumerate() {
-                    let frame_num = frame_count;
-                    frame_count += 1;
-                    self.ui_real_frame(&mut body, frame_idx, frame_num, frame);
-
                     for inline in frame.inlines.iter().rev() {
                         let frame_num = frame_count;
                         frame_count += 1;
                         self.ui_inline_frame(&mut body, frame_num, frame, inline);
                     }
+
+                    let frame_num = frame_count;
+                    frame_count += 1;
+                    self.ui_real_frame(&mut body, frame_idx, frame_num, frame);
                 }
             });
     }
