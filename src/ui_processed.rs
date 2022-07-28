@@ -1,7 +1,10 @@
+use std::ops::Range;
+
 use crate::processor::ProcessingStatus;
 use crate::{MyApp, Tab};
 use eframe::egui;
-use egui::{Color32, ComboBox, Context, FontId, Ui};
+use egui::text::LayoutJob;
+use egui::{Color32, ComboBox, Context, FontId, TextFormat, Ui};
 use egui_extras::{Size, StripBuilder, TableBody, TableBuilder};
 use minidump_common::utils::basename;
 use minidump_processor::{CallStack, ProcessState, StackFrame};
@@ -329,7 +332,34 @@ impl MyApp {
             let col5 = {
                 let mut label = String::new();
                 crate::frame_signature(&mut label, frame).unwrap();
-                fonts.layout(label, font.clone(), Color32::BLACK, col5_width)
+                let fname = &label[..];
+                let parsed = parse_function_name(fname);
+                let parts = [
+                    (0..parsed.type_name.start, false),
+                    (parsed.type_name.clone(), true),
+                    (parsed.type_name.end..parsed.func_name.start, false),
+                    (parsed.func_name.clone(), true),
+                    (parsed.func_name.end..fname.len(), false),
+                ];
+
+                let mut job = LayoutJob::default();
+                job.wrap.max_width = col5_width;
+                for (range, is_bold) in parts {
+                    job.append(
+                        &fname[range],
+                        0.0,
+                        TextFormat {
+                            font_id: font.clone(),
+                            color: if is_bold {
+                                Color32::BLACK
+                            } else {
+                                Color32::GRAY
+                            },
+                            ..Default::default()
+                        },
+                    );
+                }
+                fonts.layout_job(job)
             };
 
             let row_height = col1
@@ -422,8 +452,34 @@ impl MyApp {
                 fonts.layout(label, font.clone(), Color32::BLACK, col4_width)
             };
             let col5 = {
-                let label = frame.function_name.clone();
-                fonts.layout(label, font.clone(), Color32::BLACK, col5_width)
+                let fname = &frame.function_name;
+                let parsed = parse_function_name(fname);
+                let parts = [
+                    (0..parsed.type_name.start, false),
+                    (parsed.type_name.clone(), true),
+                    (parsed.type_name.end..parsed.func_name.start, false),
+                    (parsed.func_name.clone(), true),
+                    (parsed.func_name.end..fname.len(), false),
+                ];
+
+                let mut job = LayoutJob::default();
+                job.wrap.max_width = col5_width;
+                for (range, is_bold) in parts {
+                    job.append(
+                        &fname[range],
+                        0.0,
+                        TextFormat {
+                            font_id: font.clone(),
+                            color: if is_bold {
+                                Color32::BLACK
+                            } else {
+                                Color32::GRAY
+                            },
+                            ..Default::default()
+                        },
+                    );
+                }
+                fonts.layout_job(job)
             };
 
             let row_height = col1
@@ -461,4 +517,119 @@ impl MyApp {
             });
         });
     }
+}
+
+struct ParsedFuncName {
+    type_name: Range<usize>,
+    func_name: Range<usize>,
+    _args: Vec<Range<usize>>,
+}
+
+fn parse_function_name(func: &str) -> ParsedFuncName {
+    let mut gen_depth = 0isize;
+    let mut paren_depth = 0isize;
+    let mut last_saw_colon = false;
+    let mut last_saw_double_colon = false;
+    let mut last_saw_real_char = false;
+
+    let mut cur_piece_start = 0usize;
+    let mut cur_piece_end;
+
+    let mut func_name_start = 0usize;
+    let mut func_name_end = 0usize;
+    let mut type_name_start = 0usize;
+    let mut type_name_end = 0usize;
+
+    for (idx, c) in func.char_indices() {
+        let mut saw_colon = false;
+        let mut saw_real_char = false;
+        let mut gen_adjust = 0isize;
+        let mut paren_adjust = 0isize;
+        match c {
+            '<' => {
+                gen_adjust = 1;
+            }
+            '>' => {
+                assert!(gen_depth > 0, "mismatched generic close!");
+                gen_adjust = -1;
+            }
+            '(' => {
+                paren_adjust = 1;
+            }
+            ')' => {
+                assert!(paren_depth > 0, "mismatched generic close!");
+                paren_adjust = -1;
+            }
+            ':' => {
+                saw_colon = true;
+            }
+            ' ' => {}
+            ',' => {}
+            _ => {
+                saw_real_char = true;
+            }
+        }
+        if saw_real_char {
+            if !last_saw_real_char {
+                cur_piece_start = idx;
+                last_saw_real_char = true;
+            }
+        } else {
+            if last_saw_real_char {
+                cur_piece_end = idx;
+                if gen_depth == 0 && paren_depth == 0 {
+                    func_name_start = cur_piece_start;
+                    func_name_end = cur_piece_end;
+                }
+                if gen_depth == 1
+                    && type_name_start == 0
+                    && func_name_start == 0
+                    && (c == ' ' || gen_adjust != 0)
+                {
+                    type_name_start = cur_piece_start;
+                    type_name_end = cur_piece_end;
+                }
+                last_saw_real_char = false;
+            }
+        }
+        if saw_colon {
+            if !last_saw_colon {
+                last_saw_colon = true;
+            } else if !last_saw_double_colon {
+                last_saw_double_colon = true;
+            } else {
+                unreachable!("triple colon???");
+            }
+        } else {
+            last_saw_colon = false;
+            last_saw_double_colon = false;
+        }
+        gen_depth += gen_adjust;
+        paren_depth += paren_adjust;
+    }
+
+    if last_saw_real_char {
+        cur_piece_end = func.len();
+        if gen_depth == 0 && paren_depth == 0 {
+            func_name_start = cur_piece_start;
+            func_name_end = cur_piece_end;
+        }
+    }
+
+    let type_name = type_name_start..type_name_end;
+    let func_name = func_name_start..func_name_end;
+    let args = vec![];
+    ParsedFuncName {
+        type_name,
+        func_name,
+        _args: args,
+    }
+}
+
+#[test]
+fn test_parse_function_name() {
+    let input = r###"<alloc::vec::Vec<clap::builder::possible_value::PossibleValue> as core::iter::traits::collect::Extend<clap::builder::possible_value::PossibleValue>>::extend::<core::iter::adapters::map::Map<core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<minidumper_test::Signal>, <minidumper_test::Signal as clap::derive::ValueEnum>::to_possible_value>, <clap::builder::arg::Arg>::possible_values<core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<minidumper_test::Signal>, <minidumper_test::Signal as clap::derive::ValueEnum>::to_possible_value>, clap::builder::possible_value::PossibleValue>::{closure#0}>>"###;
+    let parsed = parse_function_name(input);
+    assert_eq!(&input[parsed.type_name], "Vec");
+    assert_eq!(&input[parsed.func_name], "extend");
 }
