@@ -1,18 +1,48 @@
 use crate::processor::ProcessingStatus;
 use crate::{MyApp, Tab};
 use eframe::egui;
-use egui::{ComboBox, Ui};
+use egui::{Color32, ComboBox, Context, FontId, Ui};
 use egui_extras::{Size, StripBuilder, TableBody, TableBuilder};
 use minidump_common::utils::basename;
-use minidump_processor::{CallStack, InlineFrame, ProcessState, StackFrame};
+use minidump_processor::{CallStack, ProcessState, StackFrame};
 
 pub struct ProcessedUiState {
     pub cur_thread: usize,
     pub cur_frame: usize,
 }
 
+use inline_shim::*;
+#[cfg(feature = "inline")]
+mod inline_shim {
+    pub use minidump_processor::InlineFrame;
+    use minidump_processor::StackFrame;
+    pub fn get_inline_frames(frame: &StackFrame) -> &[InlineFrame] {
+        &frame.inlines
+    }
+}
+
+#[cfg(not(feature = "inline"))]
+mod inline_shim {
+    use minidump_processor::StackFrame;
+
+    /// A stack frame in an inlined function.
+    #[derive(Debug, Clone)]
+    pub struct InlineFrame {
+        /// The name of the function
+        pub function_name: String,
+        /// The file name of the stack frame
+        pub source_file_name: Option<String>,
+        /// The line number of the stack frame
+        pub source_line: Option<u32>,
+    }
+
+    pub fn get_inline_frames(_frame: &StackFrame) -> &[InlineFrame] {
+        &[]
+    }
+}
+
 impl MyApp {
-    pub fn ui_processed(&mut self, ui: &mut Ui, _ctx: &egui::Context) {
+    pub fn ui_processed(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         if let Some(Err(e)) = &self.minidump {
             ui.label("Minidump couldn't be read!");
             ui.label(e.to_string());
@@ -21,7 +51,7 @@ impl MyApp {
         if let Some(state) = &self.processed {
             match state {
                 Ok(state) => {
-                    self.ui_processed_good(ui, &state.clone());
+                    self.ui_processed_good(ui, ctx, &state.clone());
                 }
                 Err(e) => {
                     ui.label("Minidump couldn't be processed!");
@@ -31,7 +61,7 @@ impl MyApp {
         }
     }
 
-    fn ui_processed_good(&mut self, ui: &mut Ui, state: &ProcessState) {
+    fn ui_processed_good(&mut self, ui: &mut Ui, ctx: &Context, state: &ProcessState) {
         // let is_symbolicated = self.cur_status == ProcessingStatus::Done;
         StripBuilder::new(ui)
             .size(Size::relative(0.5))
@@ -39,7 +69,7 @@ impl MyApp {
             .size(Size::exact(18.0))
             .vertical(|mut strip| {
                 strip.cell(|ui| {
-                    self.ui_processed_data(ui, state);
+                    self.ui_processed_data(ui, ctx, state);
                 });
                 strip.cell(|ui| {
                     ui.horizontal(|ui| {
@@ -72,7 +102,7 @@ impl MyApp {
                     ui.separator();
 
                     if let Some(stack) = state.threads.get(self.processed_ui_state.cur_thread) {
-                        self.ui_processed_backtrace(ui, stack);
+                        self.ui_processed_backtrace(ui, ctx, stack);
                     }
                 });
                 strip.cell(|ui| {
@@ -111,7 +141,7 @@ impl MyApp {
             });
     }
 
-    fn ui_processed_data(&mut self, ui: &mut Ui, state: &ProcessState) {
+    fn ui_processed_data(&mut self, ui: &mut Ui, ctx: &Context, state: &ProcessState) {
         let cur_threadname = state
             .threads
             .get(self.processed_ui_state.cur_thread)
@@ -125,6 +155,7 @@ impl MyApp {
                 strip.cell(|ui| {
                     crate::listing(
                         ui,
+                        ctx,
                         1,
                         [
                             ("OS".to_owned(), state.system_info.os.to_string()),
@@ -158,7 +189,7 @@ impl MyApp {
                                 "Crash Address".to_owned(),
                                 state
                                     .crash_address
-                                    .map(|addr| format!("0x{:08x}", addr))
+                                    .map(|addr| self.format_addr(addr))
                                     .unwrap_or_default(),
                             ),
                             ("Crashing Thread".to_owned(), cur_threadname.clone()),
@@ -171,6 +202,7 @@ impl MyApp {
                     if let Some(thread) = state.threads.get(self.processed_ui_state.cur_thread) {
                         crate::listing(
                             ui,
+                            ctx,
                             2,
                             [(
                                 "last_error_value".to_owned(),
@@ -186,15 +218,16 @@ impl MyApp {
                             let regs = frame
                                 .context
                                 .valid_registers()
-                                .map(|(name, val)| (name.to_owned(), format!("0x{:08x}", val)));
-                            crate::listing(ui, 3, regs);
+                                .map(|(name, val)| (name.to_owned(), self.format_addr(val)));
+                            crate::listing(ui, ctx, 3, regs);
                         }
                     }
                 })
             });
     }
 
-    fn ui_processed_backtrace(&mut self, ui: &mut Ui, stack: &CallStack) {
+    fn ui_processed_backtrace(&mut self, ui: &mut Ui, ctx: &Context, stack: &CallStack) {
+        let font = egui::style::TextStyle::Body.resolve(ui.style());
         TableBuilder::new(ui)
             .striped(true)
             .cell_layout(egui::Layout::left_to_right().with_cross_align(egui::Align::Center))
@@ -204,6 +237,7 @@ impl MyApp {
             .column(Size::initial(160.0).at_least(40.0))
             .column(Size::remainder().at_least(60.0))
             .resizable(true)
+            .clip(false)
             .header(20.0, |mut header| {
                 header.col(|ui| {
                     ui.heading("Frame");
@@ -223,16 +257,20 @@ impl MyApp {
             })
             .body(|mut body| {
                 let mut frame_count = 0;
+                let mut widths = [0.0f32; 5];
+                widths.clone_from_slice(body.widths());
                 for (frame_idx, frame) in stack.frames.iter().enumerate() {
-                    for inline in frame.inlines.iter().rev() {
+                    for inline in get_inline_frames(frame).iter().rev() {
                         let frame_num = frame_count;
                         frame_count += 1;
-                        self.ui_inline_frame(&mut body, frame_num, frame, inline);
+                        self.ui_inline_frame(
+                            &mut body, ctx, &widths, &font, frame_num, frame, inline,
+                        );
                     }
 
                     let frame_num = frame_count;
                     frame_count += 1;
-                    self.ui_real_frame(&mut body, frame_idx, frame_num, frame);
+                    self.ui_real_frame(&mut body, ctx, &widths, &font, frame_idx, frame_num, frame);
                 }
             });
     }
@@ -240,21 +278,30 @@ impl MyApp {
     fn ui_real_frame(
         &mut self,
         body: &mut TableBody,
+        ctx: &Context,
+        widths: &[f32],
+        font: &FontId,
         frame_idx: usize,
         frame_num: usize,
         frame: &StackFrame,
     ) {
-        let row_height = 18.0;
+        let col1_width = widths[0];
+        let col2_width = widths[1];
+        let col3_width = widths[2];
+        let col4_width = widths[3];
+        let col5_width = widths[4];
 
-        body.row(row_height, |mut row| {
-            row.col(|ui| {
-                ui.centered_and_justified(|ui| {
-                    if ui.link(frame_num.to_string()).clicked() {
-                        self.processed_ui_state.cur_frame = frame_idx;
-                    }
-                });
-            });
-            row.col(|ui| {
+        let (col1, col2, col3, col4, col5, row_height) = {
+            let fonts = ctx.fonts();
+            let col1 = {
+                fonts.layout(
+                    frame_num.to_string(),
+                    font.clone(),
+                    Color32::BLACK,
+                    col1_width,
+                )
+            };
+            let col2 = {
                 let trust = match frame.trust {
                     minidump_processor::FrameTrust::None => "none",
                     minidump_processor::FrameTrust::Scan => "scan",
@@ -264,8 +311,49 @@ impl MyApp {
                     minidump_processor::FrameTrust::PreWalked => "prewalked",
                     minidump_processor::FrameTrust::Context => "context",
                 };
+                fonts.layout(trust.to_owned(), font.clone(), Color32::BLACK, col2_width)
+            };
+            let col3 = {
+                let label = if let Some(module) = &frame.module {
+                    basename(&module.name).to_string()
+                } else {
+                    String::new()
+                };
+                fonts.layout(label, font.clone(), Color32::BLACK, col3_width)
+            };
+            let col4 = {
+                let mut label = String::new();
+                crate::frame_source(&mut label, frame).unwrap();
+                fonts.layout(label, font.clone(), Color32::BLACK, col4_width)
+            };
+            let col5 = {
+                let mut label = String::new();
+                crate::frame_signature(&mut label, frame).unwrap();
+                fonts.layout(label, font.clone(), Color32::BLACK, col5_width)
+            };
+
+            let row_height = col1
+                .rect
+                .height()
+                .max(col2.rect.height())
+                .max(col3.rect.height())
+                .max(col4.rect.height())
+                .max(col5.rect.height())
+                + 6.0;
+            (col1, col2, col3, col4, col5, row_height)
+        };
+
+        body.row(row_height, |mut row| {
+            row.col(|ui| {
                 ui.centered_and_justified(|ui| {
-                    if ui.link(trust).clicked() {
+                    if ui.link(col1).clicked() {
+                        self.processed_ui_state.cur_frame = frame_idx;
+                    }
+                });
+            });
+            row.col(|ui| {
+                ui.centered_and_justified(|ui| {
+                    if ui.link(col2).clicked() {
                         self.tab = Tab::Logs;
                         self.log_ui_state.cur_thread = Some(self.processed_ui_state.cur_thread);
                         self.log_ui_state.cur_frame = Some(frame_idx);
@@ -273,21 +361,15 @@ impl MyApp {
                 });
             });
             row.col(|ui| {
-                if let Some(module) = &frame.module {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(basename(&module.name));
-                    });
-                }
+                ui.centered_and_justified(|ui| {
+                    ui.label(col3);
+                });
             });
             row.col(|ui| {
-                let mut label = String::new();
-                crate::frame_source(&mut label, frame).unwrap();
-                ui.label(label);
+                ui.label(col4);
             });
             row.col(|ui| {
-                let mut label = String::new();
-                crate::frame_signature(&mut label, frame).unwrap();
-                ui.label(label);
+                ui.label(col5);
             });
         });
     }
@@ -295,40 +377,87 @@ impl MyApp {
     fn ui_inline_frame(
         &mut self,
         body: &mut TableBody,
+        ctx: &Context,
+        widths: &[f32],
+        font: &FontId,
         frame_num: usize,
         real_frame: &StackFrame,
         frame: &InlineFrame,
     ) {
-        let row_height = 18.0;
+        let col1_width = widths[0];
+        let col2_width = widths[1];
+        let col3_width = widths[2];
+        let col4_width = widths[3];
+        let col5_width = widths[4];
+        let (col1, col2, col3, col4, col5, row_height) = {
+            let fonts = ctx.fonts();
+            let col1 = {
+                fonts.layout(
+                    frame_num.to_string(),
+                    font.clone(),
+                    Color32::BLACK,
+                    col1_width,
+                )
+            };
+            let col2 = {
+                let trust = "inlined";
+                fonts.layout(trust.to_owned(), font.clone(), Color32::BLACK, col2_width)
+            };
+            let col3 = {
+                let label = if let Some(module) = &real_frame.module {
+                    basename(&module.name).to_string()
+                } else {
+                    String::new()
+                };
+                fonts.layout(label, font.clone(), Color32::BLACK, col3_width)
+            };
+            let col4 = {
+                let label = if let (Some(source_file), Some(line)) =
+                    (frame.source_file_name.as_ref(), frame.source_line.as_ref())
+                {
+                    format!("{}: {}", basename(source_file).to_owned(), line)
+                } else {
+                    String::new()
+                };
+                fonts.layout(label, font.clone(), Color32::BLACK, col4_width)
+            };
+            let col5 = {
+                let label = frame.function_name.clone();
+                fonts.layout(label, font.clone(), Color32::BLACK, col5_width)
+            };
+
+            let row_height = col1
+                .rect
+                .height()
+                .max(col2.rect.height())
+                .max(col3.rect.height())
+                .max(col4.rect.height())
+                .max(col5.rect.height())
+                + 6.0;
+            (col1, col2, col3, col4, col5, row_height)
+        };
 
         body.row(row_height, |mut row| {
             row.col(|ui| {
                 ui.centered_and_justified(|ui| {
-                    ui.label(frame_num.to_string());
+                    ui.label(col1);
                 });
             });
             row.col(|ui| {
-                let trust = "inlined";
                 ui.centered_and_justified(|ui| {
-                    ui.label(trust);
+                    ui.label(col2);
                 });
             });
             row.col(|ui| {
-                if let Some(module) = &real_frame.module {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(basename(&module.name));
-                    });
-                }
+                ui.centered_and_justified(|ui| {
+                    ui.label(col3);
+                });
             });
             row.col(|ui| {
-                if let (Some(source_file), Some(line)) =
-                    (frame.source_file_name.as_ref(), frame.source_line.as_ref())
-                {
-                    ui.label(format!("{}: {line}", basename(source_file)));
-                }
+                ui.label(col4);
             });
             row.col(|ui| {
-                ui.label(&frame.function_name);
+                ui.label(col5);
             });
         });
     }

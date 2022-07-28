@@ -2,11 +2,11 @@
 
 use clap::Parser;
 use eframe::egui;
-use egui::{Ui, Vec2};
+use egui::{Color32, Ui, Vec2};
 use egui_extras::{Size, TableBuilder};
 use logger::MapLogger;
 use memmap2::Mmap;
-use minidump::{format::MINIDUMP_STREAM_TYPE, Minidump, Module};
+use minidump::{format::MINIDUMP_STREAM_TYPE, system_info::PointerWidth, Minidump, Module};
 use minidump_common::utils::basename;
 use minidump_processor::{CallStack, ProcessState, StackFrame};
 use processor::{
@@ -40,6 +40,7 @@ struct MyApp {
     last_status: ProcessingStatus,
     minidump: MaybeMinidump,
     processed: MaybeProcessed,
+    pointer_width: PointerWidth,
 
     task_sender: Arc<(Mutex<Option<ProcessorTask>>, Condvar)>,
     analysis_state: Arc<MinidumpAnalysis>,
@@ -153,6 +154,7 @@ fn main() {
                 last_status: ProcessingStatus::NoDump,
                 minidump: None,
                 processed: None,
+                pointer_width: PointerWidth::Unknown,
 
                 task_sender,
                 analysis_state: analysis_receiver,
@@ -186,6 +188,7 @@ impl MyApp {
             let stats = self.analysis_state.stats.lock().unwrap();
             let partial = stats.processor_stats.take_unwalked_result();
             if let Some(state) = partial {
+                self.pointer_width = state.system_info.cpu.pointer_width();
                 if self.tab == Tab::Settings && self.cur_status <= ProcessingStatus::RawProcessing {
                     self.tab = Tab::Processed;
                 }
@@ -220,6 +223,7 @@ impl MyApp {
             }
             self.cur_status = ProcessingStatus::Done;
             if let Ok(state) = &processed {
+                self.pointer_width = state.system_info.cpu.pointer_width();
                 if let Some(crashed_thread) = state.requesting_thread {
                     self.processed_ui_state.cur_thread = crashed_thread;
                 }
@@ -316,29 +320,50 @@ impl MyApp {
             }
         });
     }
+
+    fn format_addr(&self, addr: u64) -> String {
+        match self.pointer_width {
+            minidump::system_info::PointerWidth::Bits32 => format!("0x{:08x}", addr),
+            minidump::system_info::PointerWidth::Bits64 => format!("0x{:016x}", addr),
+            minidump::system_info::PointerWidth::Unknown => format!("0x{:08x}", addr),
+        }
+    }
 }
 
-fn listing(ui: &mut Ui, id: u64, items: impl IntoIterator<Item = (String, String)>) {
+fn listing(
+    ui: &mut Ui,
+    ctx: &egui::Context,
+    id: u64,
+    items: impl IntoIterator<Item = (String, String)>,
+) {
     ui.push_id(id, |ui| {
+        let mono_font = egui::style::TextStyle::Monospace.resolve(ui.style());
+        let body_font = egui::style::TextStyle::Body.resolve(ui.style());
         TableBuilder::new(ui)
             .striped(true)
             .cell_layout(egui::Layout::left_to_right().with_cross_align(egui::Align::Center))
             .column(Size::initial(120.0).at_least(40.0))
             .column(Size::remainder().at_least(60.0))
+            .clip(false)
             .resizable(true)
             .body(|mut body| {
+                let widths = body.widths();
+                let col1_width = widths[0];
+                let col2_width = widths[1];
                 for (lhs, rhs) in items {
-                    let row_height = 18.0;
+                    let (col1, col2, row_height) = {
+                        let fonts = ctx.fonts();
+                        let col1 = fonts.layout(lhs, body_font.clone(), Color32::BLACK, col1_width);
+                        let col2 = fonts.layout(rhs, mono_font.clone(), Color32::BLACK, col2_width);
+                        let row_height = col1.rect.height().max(col2.rect.height()) + 6.0;
+                        (col1, col2, row_height)
+                    };
                     body.row(row_height, |mut row| {
                         row.col(|ui| {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut &*lhs).desired_width(f32::INFINITY),
-                            );
+                            ui.label(col1);
                         });
                         row.col(|ui| {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut &*rhs).desired_width(f32::INFINITY),
-                            );
+                            ui.label(col2);
                         });
                     });
                 }
