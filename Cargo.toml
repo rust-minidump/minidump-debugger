@@ -17,10 +17,10 @@ eframe = "0.18.0"
 egui = "0.18.1"
 egui_extras = "0.18.0"
 memmap2 = "0.5.5"
-breakpad-symbols = { version = "0.13.0", git="https://github.com/Gankra/rust-minidump", branch="inline" }
-minidump = { version = "0.13.0", git="https://github.com/Gankra/rust-minidump", branch="inline" }
-minidump-common = { version = "0.13.0", git="https://github.com/Gankra/rust-minidump", branch="inline" }
-minidump-processor = { version = "0.13.0", features = ["http", "dump_syms"], git="https://github.com/Gankra/rust-minidump", branch="inline" }
+breakpad-symbols = { version = "0.13.0" }
+minidump = { version = "0.13.0" }
+minidump-common = { version = "0.13.0" }
+minidump-processor = { version = "0.13.0", features = ["http", "dump_syms"] }
 num-traits = "0.2.15"
 rfd = "0.9.1"
 tempfile = "3.3.0"
