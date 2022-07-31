@@ -298,26 +298,27 @@ impl MyApp {
 // out of control with all these unrelated UIs together!
 impl MyApp {
     fn update_ui(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Settings, "settings");
-                if self.cur_status >= ProcessingStatus::RawProcessing {
-                    ui.selectable_value(&mut self.tab, Tab::RawDump, "raw dump");
-                }
-                if self.cur_status >= ProcessingStatus::Symbolicating {
-                    ui.selectable_value(&mut self.tab, Tab::Processed, "processed");
-                }
-                if self.cur_status >= ProcessingStatus::RawProcessing {
-                    ui.selectable_value(&mut self.tab, Tab::Logs, "logs");
-                }
+        egui::TopBottomPanel::top("tab bar")
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.tab, Tab::Settings, "settings");
+                    if self.cur_status >= ProcessingStatus::RawProcessing {
+                        ui.selectable_value(&mut self.tab, Tab::RawDump, "raw dump");
+                    }
+                    if self.cur_status >= ProcessingStatus::Symbolicating {
+                        ui.selectable_value(&mut self.tab, Tab::Processed, "processed");
+                    }
+                    if self.cur_status >= ProcessingStatus::RawProcessing {
+                        ui.selectable_value(&mut self.tab, Tab::Logs, "logs");
+                    }
+                });
             });
-            ui.separator();
-            match self.tab {
-                Tab::Settings => self.ui_settings(ui, ctx),
-                Tab::RawDump => self.ui_raw_dump(ui, ctx),
-                Tab::Processed => self.ui_processed(ui, ctx),
-                Tab::Logs => self.ui_logs(ui, ctx),
-            }
+        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
+            Tab::Settings => self.ui_settings(ui, ctx),
+            Tab::RawDump => self.ui_raw_dump(ui, ctx),
+            Tab::Processed => self.ui_processed(ui, ctx),
+            Tab::Logs => self.ui_logs(ui, ctx),
         });
     }
 
@@ -346,6 +347,7 @@ fn listing(
             .column(Size::remainder().at_least(60.0))
             .clip(false)
             .resizable(true)
+            .scroll(false)
             .body(|mut body| {
                 let widths = body.widths();
                 let col1_width = widths[0];

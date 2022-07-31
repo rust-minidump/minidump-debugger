@@ -1,7 +1,7 @@
 use crate::MyApp;
 use eframe::egui;
-use egui::{TextStyle, Ui};
-use egui_extras::{Size, StripBuilder, TableBuilder};
+use egui::{Frame, TextStyle, Ui};
+use egui_extras::{Size, TableBuilder};
 use memmap2::Mmap;
 use minidump::{format::MINIDUMP_STREAM_TYPE, Minidump};
 use num_traits::FromPrimitive;
@@ -26,65 +26,58 @@ impl MyApp {
     }
 
     fn ui_raw_dump_good(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
-        StripBuilder::new(ui)
-            .size(Size::exact(180.0))
-            .size(Size::remainder())
-            .horizontal(|mut strip| {
-                strip.cell(|ui| {
-                    self.ui_raw_dump_streams(ui, dump);
-                });
-                strip.cell(|ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        if self.raw_dump_ui_state.cur_stream == 0 {
-                            self.ui_raw_dump_top_level(ui, dump);
-                            return;
-                        }
-                        let stream = dump
-                            .all_streams()
-                            .nth(self.raw_dump_ui_state.cur_stream - 1)
-                            .and_then(|entry| MINIDUMP_STREAM_TYPE::from_u32(entry.stream_type));
-                        if let Some(stream) = stream {
-                            use MINIDUMP_STREAM_TYPE::*;
-                            match stream {
-                                SystemInfoStream => self.update_raw_dump_system_info(ui, dump),
-                                ThreadNamesStream => self.update_raw_dump_thread_names(ui, dump),
-                                MiscInfoStream => self.update_raw_dump_misc_info(ui, dump),
-                                ThreadListStream => self.update_raw_dump_thread_list(ui, dump),
-                                AssertionInfoStream => {
-                                    self.update_raw_dump_assertion_info(ui, dump)
-                                }
-                                BreakpadInfoStream => self.update_raw_dump_breakpad_info(ui, dump),
-                                CrashpadInfoStream => self.update_raw_dump_crashpad_info(ui, dump),
-                                ExceptionStream => self.update_raw_dump_exception(ui, dump),
-                                ModuleListStream => self.update_raw_dump_module_list(ui, dump),
-                                UnloadedModuleListStream => {
-                                    self.update_raw_dump_unloaded_module_list(ui, dump)
-                                }
-                                MemoryListStream => self.update_raw_dump_memory_list(ui, dump),
-                                Memory64ListStream => self.update_raw_dump_memory_64_list(ui, dump),
-                                MemoryInfoListStream => {
-                                    self.update_raw_dump_memory_info_list(ui, dump)
-                                }
-                                LinuxMaps => self.update_raw_dump_linux_maps(ui, dump),
-                                LinuxCmdLine => self.update_raw_dump_linux_cmd_line(ui, dump),
-                                LinuxCpuInfo => self.update_raw_dump_linux_cpu_info(ui, dump),
-                                LinuxEnviron => self.update_raw_dump_linux_environ(ui, dump),
-                                LinuxLsbRelease => self.update_raw_dump_linux_lsb_release(ui, dump),
-                                LinuxProcStatus => self.update_raw_dump_linux_proc_status(ui, dump),
-                                MozMacosCrashInfoStream => {
-                                    self.update_raw_dump_moz_macos_crash_info(ui, dump)
-                                }
-                                _ => {}
-                            }
-                        }
-                    });
-                });
+        egui::SidePanel::left("streams")
+            .frame(Frame::none())
+            .show_inside(ui, |ui| {
+                self.ui_raw_dump_streams(ui, dump);
             });
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if self.raw_dump_ui_state.cur_stream == 0 {
+                    self.ui_raw_dump_top_level(ui, dump);
+                    return;
+                }
+                let stream = dump
+                    .all_streams()
+                    .nth(self.raw_dump_ui_state.cur_stream - 1)
+                    .and_then(|entry| MINIDUMP_STREAM_TYPE::from_u32(entry.stream_type));
+                if let Some(stream) = stream {
+                    use MINIDUMP_STREAM_TYPE::*;
+                    match stream {
+                        SystemInfoStream => self.update_raw_dump_system_info(ui, dump),
+                        ThreadNamesStream => self.update_raw_dump_thread_names(ui, dump),
+                        MiscInfoStream => self.update_raw_dump_misc_info(ui, dump),
+                        ThreadListStream => self.update_raw_dump_thread_list(ui, dump),
+                        AssertionInfoStream => self.update_raw_dump_assertion_info(ui, dump),
+                        BreakpadInfoStream => self.update_raw_dump_breakpad_info(ui, dump),
+                        CrashpadInfoStream => self.update_raw_dump_crashpad_info(ui, dump),
+                        ExceptionStream => self.update_raw_dump_exception(ui, dump),
+                        ModuleListStream => self.update_raw_dump_module_list(ui, dump),
+                        UnloadedModuleListStream => {
+                            self.update_raw_dump_unloaded_module_list(ui, dump)
+                        }
+                        MemoryListStream => self.update_raw_dump_memory_list(ui, dump),
+                        Memory64ListStream => self.update_raw_dump_memory_64_list(ui, dump),
+                        MemoryInfoListStream => self.update_raw_dump_memory_info_list(ui, dump),
+                        LinuxMaps => self.update_raw_dump_linux_maps(ui, dump),
+                        LinuxCmdLine => self.update_raw_dump_linux_cmd_line(ui, dump),
+                        LinuxCpuInfo => self.update_raw_dump_linux_cpu_info(ui, dump),
+                        LinuxEnviron => self.update_raw_dump_linux_environ(ui, dump),
+                        LinuxLsbRelease => self.update_raw_dump_linux_lsb_release(ui, dump),
+                        LinuxProcStatus => self.update_raw_dump_linux_proc_status(ui, dump),
+                        MozMacosCrashInfoStream => {
+                            self.update_raw_dump_moz_macos_crash_info(ui, dump)
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        });
     }
 
     fn ui_raw_dump_streams(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
         ui.heading("Streams");
-        ui.add_space(20.0);
+        ui.separator();
         ui.selectable_value(&mut self.raw_dump_ui_state.cur_stream, 0, "<summary>");
 
         for (i, stream) in dump.all_streams().enumerate() {

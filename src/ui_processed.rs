@@ -1,8 +1,8 @@
 use crate::processor::ProcessingStatus;
 use crate::{MyApp, Tab};
 use eframe::egui;
-use egui::{Color32, ComboBox, Context, FontId, Ui};
-use egui_extras::{Size, StripBuilder, TableBody, TableBuilder};
+use egui::{Color32, ComboBox, Context, FontId, Frame, ScrollArea, Ui};
+use egui_extras::{Size, TableBody, TableBuilder};
 use minidump_common::utils::basename;
 use minidump_processor::{CallStack, ProcessState, StackFrame};
 
@@ -63,81 +63,56 @@ impl MyApp {
 
     fn ui_processed_good(&mut self, ui: &mut Ui, ctx: &Context, state: &ProcessState) {
         // let is_symbolicated = self.cur_status == ProcessingStatus::Done;
-        StripBuilder::new(ui)
-            .size(Size::relative(0.5))
-            .size(Size::remainder())
-            .size(Size::exact(18.0))
-            .vertical(|mut strip| {
-                strip.cell(|ui| {
-                    self.ui_processed_data(ui, ctx, state);
+        egui::TopBottomPanel::top("info")
+            .resizable(true)
+            .default_height((ui.available_height() / 2.0).round())
+            .frame(Frame::none())
+            .show_inside(ui, |ui| {
+                self.ui_processed_data(ui, ctx, state);
+            });
+        egui::TopBottomPanel::bottom("progress")
+            .frame(Frame::none())
+            .show_inside(ui, |ui| {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    let stats = self.analysis_state.stats.lock().unwrap();
+                    let symbols = stats.pending_symbols.lock().unwrap().clone();
+                    let (t_done, t_todo) = stats.processor_stats.get_thread_count();
+                    let frames_walked = stats.processor_stats.get_frame_count();
+
+                    let estimated_frames_per_thread = 10.0;
+                    let estimated_progress = if t_todo == 0 {
+                        0.0
+                    } else {
+                        let ratio =
+                            frames_walked as f32 / (t_todo as f32 * estimated_frames_per_thread);
+                        ratio.min(0.9)
+                    };
+                    let in_progress = self.cur_status < ProcessingStatus::Done;
+                    let progress = if in_progress { estimated_progress } else { 1.0 };
+
+                    ui.label(format!(
+                        "fetching symbols {}/{}",
+                        symbols.symbols_processed, symbols.symbols_requested
+                    ));
+                    ui.label(format!("processing threads {}/{}", t_done, t_todo));
+                    ui.label(format!("frames walked {}", frames_walked));
+
+                    let progress_bar = egui::ProgressBar::new(progress)
+                        .show_percentage()
+                        .animate(in_progress);
+
+                    ui.add(progress_bar);
                 });
-                strip.cell(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Thread: ");
-                        ComboBox::from_label("  ")
-                            .width(400.0)
-                            .selected_text(
-                                state
-                                    .threads
-                                    .get(self.processed_ui_state.cur_thread)
-                                    .map(crate::threadname)
-                                    .unwrap_or_default(),
-                            )
-                            .show_ui(ui, |ui| {
-                                for (idx, stack) in state.threads.iter().enumerate() {
-                                    if ui
-                                        .selectable_value(
-                                            &mut self.processed_ui_state.cur_thread,
-                                            idx,
-                                            crate::threadname(stack),
-                                        )
-                                        .changed()
-                                    {
-                                        self.processed_ui_state.cur_frame = 0;
-                                    };
-                                }
-                            });
-                    });
+            });
+        egui::CentralPanel::default()
+            .frame(Frame::none())
+            .show_inside(ui, |ui| {
+                ui.separator();
 
-                    ui.separator();
-
-                    if let Some(stack) = state.threads.get(self.processed_ui_state.cur_thread) {
-                        self.ui_processed_backtrace(ui, ctx, stack);
-                    }
-                });
-                strip.cell(|ui| {
-                    ui.add_space(2.0);
-                    ui.horizontal(|ui| {
-                        let stats = self.analysis_state.stats.lock().unwrap();
-                        let symbols = stats.pending_symbols.lock().unwrap().clone();
-                        let (t_done, t_todo) = stats.processor_stats.get_thread_count();
-                        let frames_walked = stats.processor_stats.get_frame_count();
-
-                        let estimated_frames_per_thread = 10.0;
-                        let estimated_progress = if t_todo == 0 {
-                            0.0
-                        } else {
-                            let ratio = frames_walked as f32
-                                / (t_todo as f32 * estimated_frames_per_thread);
-                            ratio.min(0.9)
-                        };
-                        let in_progress = self.cur_status < ProcessingStatus::Done;
-                        let progress = if in_progress { estimated_progress } else { 1.0 };
-
-                        ui.label(format!(
-                            "fetching symbols {}/{}",
-                            symbols.symbols_processed, symbols.symbols_requested
-                        ));
-                        ui.label(format!("processing threads {}/{}", t_done, t_todo));
-                        ui.label(format!("frames walked {}", frames_walked));
-
-                        let progress_bar = egui::ProgressBar::new(progress)
-                            .show_percentage()
-                            .animate(in_progress);
-
-                        ui.add(progress_bar);
-                    });
-                });
+                if let Some(stack) = state.threads.get(self.processed_ui_state.cur_thread) {
+                    self.ui_processed_backtrace(ui, ctx, stack);
+                }
             });
     }
 
@@ -147,12 +122,14 @@ impl MyApp {
             .get(self.processed_ui_state.cur_thread)
             .map(crate::threadname)
             .unwrap_or_default();
+        egui::SidePanel::left("overall info")
+            .default_width((ui.available_width() / 2.0).round())
+            .frame(Frame::none())
+            .show_inside(ui, |ui| {
+                ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading("Process");
+                    ui.separator();
 
-        StripBuilder::new(ui)
-            .size(Size::relative(0.5))
-            .size(Size::relative(0.5))
-            .horizontal(|mut strip| {
-                strip.cell(|ui| {
                     crate::listing(
                         ui,
                         ctx,
@@ -196,9 +173,38 @@ impl MyApp {
                         ],
                     );
                 });
-                strip.cell(|ui| {
-                    ui.add_space(10.0);
-                    ui.heading(format!("Thread {}", cur_threadname));
+            });
+        egui::CentralPanel::default()
+            .frame(Frame::none())
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("Thread ");
+                    ComboBox::from_label("  ")
+                        .width(400.0)
+                        .selected_text(
+                            state
+                                .threads
+                                .get(self.processed_ui_state.cur_thread)
+                                .map(crate::threadname)
+                                .unwrap_or_default(),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (idx, stack) in state.threads.iter().enumerate() {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.processed_ui_state.cur_thread,
+                                        idx,
+                                        crate::threadname(stack),
+                                    )
+                                    .changed()
+                                {
+                                    self.processed_ui_state.cur_frame = 0;
+                                };
+                            }
+                        });
+                });
+                ui.separator();
+                ScrollArea::vertical().show(ui, |ui| {
                     if let Some(thread) = state.threads.get(self.processed_ui_state.cur_thread) {
                         crate::listing(
                             ui,
@@ -214,7 +220,31 @@ impl MyApp {
                         );
                         if let Some(frame) = thread.frames.get(self.processed_ui_state.cur_frame) {
                             ui.add_space(20.0);
-                            ui.heading(format!("Frame {}", self.processed_ui_state.cur_frame));
+                            ui.horizontal(|ui| {
+                                use std::fmt::Write;
+                                let mut label = String::new();
+                                write!(&mut label, "{:02} - ", self.processed_ui_state.cur_frame)
+                                    .unwrap();
+                                crate::frame_signature(&mut label, frame).unwrap();
+                                ui.heading("Frame ");
+
+                                ComboBox::from_label(" ")
+                                    .width(400.0)
+                                    .selected_text(label)
+                                    .show_ui(ui, |ui| {
+                                        for (idx, frame) in thread.frames.iter().enumerate() {
+                                            let mut label = String::new();
+                                            write!(&mut label, "{:02} - ", idx).unwrap();
+                                            crate::frame_signature(&mut label, frame).unwrap();
+                                            ui.selectable_value(
+                                                &mut self.processed_ui_state.cur_frame,
+                                                idx,
+                                                label,
+                                            );
+                                        }
+                                    });
+                            });
+
                             let regs = frame
                                 .context
                                 .valid_registers()
