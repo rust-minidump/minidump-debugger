@@ -37,8 +37,8 @@ At this point the UI is mostly at parity with [minidump-stackwalk](https://githu
 # Screenshots
 
 ![Screenshot 2022-07-31 100438](https://user-images.githubusercontent.com/1136864/182030146-c78161b5-a622-46a7-a995-1628cd55f0fa.png)
-![Screenshot 2022-07-31 100606](https://user-images.githubusercontent.com/1136864/182030145-962766ce-020f-441a-ab9f-93461d591eb2.png)
-![Screenshot 2022-07-31 100508](https://user-images.githubusercontent.com/1136864/182030147-5df28f9e-ec89-4ff6-bd0a-501c6953ce7f.png)
+![Screenshot 2022-07-31 121102](https://user-images.githubusercontent.com/1136864/182035416-f70553b7-2901-4329-a2e1-15d0d7e35938.png)
+![Screenshot 2022-07-31 121029](https://user-images.githubusercontent.com/1136864/182035415-c05f7fe2-c0ce-4ed8-9151-b2b902911de5.png)
 ![Screenshot 2022-07-31 100542](https://user-images.githubusercontent.com/1136864/182030142-b4b3bb5c-0445-4749-bf8d-f3095952fcca.png)
 
 
