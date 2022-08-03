@@ -1,6 +1,6 @@
 [package]
 name = "minidump-debugger"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "an experimental GUI for inspecting minidumps with rust-minidump"
 license = "MIT OR Apache-2.0"
@@ -10,6 +10,9 @@ categories = ["development-tools"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
+default = ["inline"]
+
+# Use the inline frame fields introduced in rust-minidump 0.14.0
 inline = []
 
 [dependencies]
@@ -17,10 +20,10 @@ eframe = "0.18.0"
 egui = "0.18.1"
 egui_extras = "0.18.0"
 memmap2 = "0.5.5"
-breakpad-symbols = { version = "0.13.0" }
-minidump = { version = "0.13.0" }
-minidump-common = { version = "0.13.0" }
-minidump-processor = { version = "0.13.0", features = ["http", "dump_syms"] }
+breakpad-symbols = { version = "0.14.0" }
+minidump = { version = "0.14.0" }
+minidump-common = { version = "0.14.0" }
+minidump-processor = { version = "0.14.0", features = ["http", "dump_syms"] }
 num-traits = "0.2.15"
 rfd = "0.9.1"
 tempfile = "3.3.0"
