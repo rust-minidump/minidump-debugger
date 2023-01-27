@@ -13,6 +13,7 @@ use processor::{
     MaybeMinidump, MaybeProcessed, MinidumpAnalysis, ProcessDump, ProcessingStatus, ProcessorTask,
 };
 use std::{
+    cmp::Ordering,
     path::PathBuf,
     sync::{Arc, Condvar, Mutex},
 };
@@ -204,13 +205,17 @@ impl MyApp {
                 let partial = Arc::make_mut(partial);
                 stats.processor_stats.drain_new_frames(|frame| {
                     let thread = &mut partial.threads[frame.thread_idx];
-                    if thread.frames.len() > frame.frame_idx {
-                        // Allows us to overwrite the old context frame
-                        thread.frames[frame.frame_idx] = frame.frame;
-                    } else if thread.frames.len() == frame.frame_idx {
-                        thread.frames.push(frame.frame);
-                    } else {
-                        unreachable!("stack frames arrived in wrong order??");
+                    match thread.frames.len().cmp(&frame.frame_idx) {
+                        Ordering::Greater => {
+                            // Allows us to overwrite the old context frame
+                            thread.frames[frame.frame_idx] = frame.frame;
+                        }
+                        Ordering::Equal => {
+                            thread.frames.push(frame.frame);
+                        }
+                        Ordering::Less => {
+                            unreachable!("stack frames arrived in wrong order??");
+                        }
                     }
                 });
             }
@@ -324,9 +329,9 @@ impl MyApp {
 
     fn format_addr(&self, addr: u64) -> String {
         match self.pointer_width {
-            minidump::system_info::PointerWidth::Bits32 => format!("0x{:08x}", addr),
-            minidump::system_info::PointerWidth::Bits64 => format!("0x{:016x}", addr),
-            minidump::system_info::PointerWidth::Unknown => format!("0x{:08x}", addr),
+            minidump::system_info::PointerWidth::Bits32 => format!("0x{addr:08x}"),
+            minidump::system_info::PointerWidth::Bits64 => format!("0x{addr:016x}"),
+            minidump::system_info::PointerWidth::Unknown => format!("0x{addr:08x}"),
         }
     }
 }
@@ -404,7 +409,7 @@ fn stream_vendor(stream_type: u32) -> &'static str {
 fn frame_source(f: &mut impl std::fmt::Write, frame: &StackFrame) -> Result<(), std::fmt::Error> {
     let addr = frame.instruction;
     if let Some(ref module) = frame.module {
-        if let (&Some(ref source_file), &Some(ref source_line), &Some(ref _source_line_base)) = (
+        if let (Some(source_file), Some(source_line), Some(_source_line_base)) = (
             &frame.source_file_name,
             &frame.source_line,
             &frame.source_line_base,
@@ -457,10 +462,9 @@ fn frame_signature(
 ) -> Result<(), std::fmt::Error> {
     let addr = frame.instruction;
     if let Some(ref module) = frame.module {
-        if let (&Some(ref function), &Some(ref _function_base)) =
-            (&frame.function_name, &frame.function_base)
+        if let (Some(function), Some(_function_base)) = (&frame.function_name, &frame.function_base)
         {
-            write!(f, "{}", function)?;
+            write!(f, "{function}")?;
         } else {
             write!(
                 f,
@@ -470,7 +474,7 @@ fn frame_signature(
             )?;
         }
     } else {
-        write!(f, "{:#x}", addr)?;
+        write!(f, "{addr:#x}")?;
 
         // List off overlapping unloaded modules.
 
@@ -478,14 +482,14 @@ fn frame_signature(
         // all the overlaps from one module together and dedupe them.
 
         for (name, offsets) in &frame.unloaded_modules {
-            write!(f, " (unloaded {}@", name)?;
+            write!(f, " (unloaded {name}@")?;
             let mut first = true;
             for offset in offsets {
                 if first {
-                    write!(f, "{:#x}", offset)?;
+                    write!(f, "{offset:#x}")?;
                 } else {
                     // `|` is our separator for multiple entries
-                    write!(f, "|{:#x}", offset)?;
+                    write!(f, "|{offset:#x}")?;
                 }
                 first = false;
             }

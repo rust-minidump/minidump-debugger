@@ -157,7 +157,7 @@ impl MapLogger {
                         if let Some(message) = event.fields.get("message") {
                             print_indent(output, depth + 1);
                             // writeln!(output, "[{:5}] {}", event.level, message).unwrap();
-                            writeln!(output, "{}", message).unwrap();
+                            writeln!(output, "{message}").unwrap();
                         }
                     }
                     EventEntry::Span(sub_span) => {
@@ -414,7 +414,7 @@ impl<'a> tracing::field::Visit for SpanVisitor<'a> {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         self.0
             .fields
-            .insert(field.to_string(), format!("{:?}", value));
+            .insert(field.to_string(), format!("{value:?}"));
     }
 }
 
@@ -451,6 +451,6 @@ impl<'a> tracing::field::Visit for MapVisitor<'a> {
     }
 
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.0.insert(field.to_string(), format!("{:?}", value));
+        self.0.insert(field.to_string(), format!("{value:?}"));
     }
 }

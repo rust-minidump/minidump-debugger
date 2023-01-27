@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::processor::ProcessingStatus;
 use crate::{MyApp, Tab};
 use eframe::egui;
@@ -95,8 +97,8 @@ impl MyApp {
                         "fetching symbols {}/{}",
                         symbols.symbols_processed, symbols.symbols_requested
                     ));
-                    ui.label(format!("processing threads {}/{}", t_done, t_todo));
-                    ui.label(format!("frames walked {}", frames_walked));
+                    ui.label(format!("processing threads {t_done}/{t_todo}"));
+                    ui.label(format!("frames walked {frames_walked}"));
 
                     let progress_bar = egui::ProgressBar::new(progress)
                         .show_percentage()
@@ -141,7 +143,7 @@ impl MyApp {
                                 state
                                     .system_info
                                     .format_os_version()
-                                    .map(|s| s.clone().into_owned())
+                                    .map(|s| s.into_owned())
                                     .unwrap_or_default(),
                             ),
                             ("CPU".to_owned(), state.system_info.cpu.to_string()),
@@ -234,7 +236,7 @@ impl MyApp {
                                     .show_ui(ui, |ui| {
                                         for (idx, frame) in thread.frames.iter().enumerate() {
                                             let mut label = String::new();
-                                            write!(&mut label, "{:02} - ", idx).unwrap();
+                                            write!(&mut label, "{idx:02} - ").unwrap();
                                             crate::frame_signature(&mut label, frame).unwrap();
                                             ui.selectable_value(
                                                 &mut self.processed_ui_state.cur_frame,

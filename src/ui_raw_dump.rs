@@ -108,7 +108,7 @@ impl MyApp {
                             | LinuxProcStatus
                     );
 
-                    (supported, format!("{:?}", stream_type))
+                    (supported, format!("{stream_type:?}"))
                 } else {
                     (false, "<unknown>".to_string())
                 };
@@ -192,7 +192,7 @@ impl MyApp {
                                         | LinuxLsbRelease
                                         | LinuxProcStatus
                                 );
-                                (supported, format!("{:?}", stream_type))
+                                (supported, format!("{stream_type:?}"))
                             } else {
                                 (false, "<unknown>".to_string())
                             };
@@ -600,11 +600,11 @@ fn print_raw_stream<T: std::io::Write>(
     contents: &[u8],
     out: &mut T,
 ) -> std::io::Result<()> {
-    writeln!(out, "Stream {}:", name)?;
+    writeln!(out, "Stream {name}:")?;
     let s = contents
         .split(|&v| v == 0)
         .map(String::from_utf8_lossy)
         .collect::<Vec<_>>()
         .join("\\0\n");
-    write!(out, "{}\n\n", s)
+    write!(out, "{s}\n\n")
 }
