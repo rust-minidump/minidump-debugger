@@ -6,7 +6,8 @@ use eframe::egui;
 use egui::{Color32, ComboBox, Context, FontId, Frame, ScrollArea, Ui};
 use egui_extras::{Size, TableBody, TableBuilder};
 use minidump_common::utils::basename;
-use minidump_processor::{CallStack, ProcessState, StackFrame};
+use minidump_processor::ProcessState;
+use minidump_unwind::{CallStack, StackFrame};
 
 pub struct ProcessedUiState {
     pub cur_thread: usize,
@@ -16,8 +17,8 @@ pub struct ProcessedUiState {
 use inline_shim::*;
 #[cfg(feature = "inline")]
 mod inline_shim {
-    pub use minidump_processor::InlineFrame;
-    use minidump_processor::StackFrame;
+    pub use minidump_unwind::InlineFrame;
+    use minidump_unwind::StackFrame;
     pub fn get_inline_frames(frame: &StackFrame) -> &[InlineFrame] {
         &frame.inlines
     }
@@ -156,8 +157,9 @@ impl MyApp {
                             (
                                 "Crash Reason".to_owned(),
                                 state
-                                    .crash_reason
-                                    .map(|r| r.to_string())
+                                    .exception_info
+                                    .as_ref()
+                                    .map(|e| e.reason.to_string())
                                     .unwrap_or_default(),
                             ),
                             (
@@ -167,9 +169,10 @@ impl MyApp {
                             (
                                 "Crash Address".to_owned(),
                                 state
-                                    .crash_address
-                                    .map(|addr| self.format_addr(addr))
-                                    .unwrap_or_default(),
+                                .exception_info
+                                .as_ref()
+                                .map(|e| self.format_addr(e.address.0))
+                                .unwrap_or_default(),
                             ),
                             ("Crashing Thread".to_owned(), cur_threadname.clone()),
                         ],
@@ -335,13 +338,13 @@ impl MyApp {
             };
             let col2 = {
                 let trust = match frame.trust {
-                    minidump_processor::FrameTrust::None => "none",
-                    minidump_processor::FrameTrust::Scan => "scan",
-                    minidump_processor::FrameTrust::CfiScan => "cfi scan",
-                    minidump_processor::FrameTrust::FramePointer => "frame pointer",
-                    minidump_processor::FrameTrust::CallFrameInfo => "cfi",
-                    minidump_processor::FrameTrust::PreWalked => "prewalked",
-                    minidump_processor::FrameTrust::Context => "context",
+                    minidump_unwind::FrameTrust::None => "none",
+                    minidump_unwind::FrameTrust::Scan => "scan",
+                    minidump_unwind::FrameTrust::CfiScan => "cfi scan",
+                    minidump_unwind::FrameTrust::FramePointer => "frame pointer",
+                    minidump_unwind::FrameTrust::CallFrameInfo => "cfi",
+                    minidump_unwind::FrameTrust::PreWalked => "prewalked",
+                    minidump_unwind::FrameTrust::Context => "context",
                 };
                 fonts.layout(trust.to_owned(), font.clone(), Color32::BLACK, col2_width)
             };

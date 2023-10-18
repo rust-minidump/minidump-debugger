@@ -8,7 +8,8 @@ use logger::MapLogger;
 use memmap2::Mmap;
 use minidump::{format::MINIDUMP_STREAM_TYPE, system_info::PointerWidth, Minidump, Module};
 use minidump_common::utils::basename;
-use minidump_processor::{CallStack, ProcessState, StackFrame};
+use minidump_processor::ProcessState;
+use minidump_unwind::{CallStack, StackFrame};
 use processor::{
     MaybeMinidump, MaybeProcessed, MinidumpAnalysis, ProcessDump, ProcessingStatus, ProcessorTask,
 };
@@ -90,7 +91,7 @@ fn main() {
             ("https://symbols.mozilla.org/".to_string(), true),
             (
                 "https://msdl.microsoft.com/download/symbols/".to_string(),
-                false,
+                true,
             ),
             (String::new(), true),
         ]

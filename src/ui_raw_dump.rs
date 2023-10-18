@@ -298,7 +298,7 @@ impl MyApp {
     fn update_raw_dump_thread_list(&mut self, ui: &mut Ui, dump: &Minidump<Mmap>) {
         let brief = self.settings.raw_dump_brief;
         let stream = dump.get_stream::<minidump::MinidumpThreadList>();
-        let memory = dump.get_stream::<minidump::MinidumpMemoryList>();
+        let memory = dump.get_memory();
         let system = dump.get_stream::<minidump::MinidumpSystemInfo>();
         let misc = dump.get_stream::<minidump::MinidumpMiscInfo>();
         if let Err(e) = &stream {
@@ -311,7 +311,7 @@ impl MyApp {
         stream
             .print(
                 &mut bytes,
-                memory.as_ref().ok(),
+                memory.as_ref(),
                 system.as_ref().ok(),
                 misc.as_ref().ok(),
                 brief,

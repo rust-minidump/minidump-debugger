@@ -5,9 +5,10 @@ use std::{
 
 use memmap2::Mmap;
 use minidump::Minidump;
-use minidump_processor::{
-    http_symbol_supplier, PendingProcessorStatSubscriptions, PendingProcessorStats,
-    PendingSymbolStats, ProcessState, ProcessorOptions, Symbolizer,
+use minidump_processor::{ProcessState, ProcessorOptions, PendingProcessorStatSubscriptions, PendingProcessorStats,};
+use minidump_unwind::{
+    http_symbol_supplier,
+    PendingSymbolStats,  Symbolizer,
 };
 
 #[derive(Default, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
