@@ -1,4 +1,7 @@
 {
+    "build": {
+        "path_prefix": "minidump-debugger"
+    },
     "styles": {
         "theme": "cupcake"
     }
