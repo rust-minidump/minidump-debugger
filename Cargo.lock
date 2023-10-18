@@ -1865,7 +1865,7 @@ dependencies = [
 
 [[package]]
 name = "minidump-debugger"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "breakpad-symbols",
  "clap 3.2.25",
