@@ -1,7 +1,11 @@
-# Next Release (not yet published)
+# Unreleased
 
 Nothing Yet!
 
+
+# Version 0.3.3 (2023-10-18)
+
+Updating dependencies again, rust-minidump upgraded to 0.18.0
 
 
 # Version 0.3.2 (2023-01-31)
