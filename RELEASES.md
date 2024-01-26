@@ -2,6 +2,10 @@
 
 Nothing Yet!
 
+# Version 0.3.4 (2024-01-26)
+
+Added log filtering for uninteresting libraries like tokio/hyper
+
 
 # Version 0.3.3 (2023-10-18)
 

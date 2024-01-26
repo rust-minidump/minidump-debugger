@@ -1,6 +1,6 @@
 [package]
 name = "minidump-debugger"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 description = "an experimental GUI for inspecting minidumps with rust-minidump"
 license = "MIT OR Apache-2.0"
