@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 const TRACE_THREAD_SPAN: &str = "unwind_thread";
 const TRACE_FRAME_SPAN: &str = "unwind_frame";
 const TRACE_FRAME_SPAN_IDX: &str = "idx";
+const IGNORE_LIST: &[&str] = &["hyper", "log", "h2", "tokio"];
+
 
 /// An in-memory logger that lets us view particular
 /// spans of the logs, and understands minidump-stackwalk's
@@ -56,6 +58,7 @@ enum EventEntry {
 struct MessageEntry {
     level: Level,
     fields: BTreeMap<String, String>,
+    target: String,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -67,6 +70,7 @@ enum Query {
 
 impl MapLogger {
     pub fn new() -> Self {
+        eprintln!("aaa");
         Self::default()
     }
     pub fn clear(&self) {
@@ -100,7 +104,8 @@ impl MapLogger {
         if let Some(thread) = thread {
             self.string_query(Query::Thread(thread))
         } else {
-            self.string_query(Query::All)
+            Arc::new(String::from("thread whoops!"))
+            // self.string_query(Query::All)
         }
     }
 
@@ -124,7 +129,8 @@ impl MapLogger {
         if let (Some(thread), Some(frame)) = (thread, frame) {
             self.string_query(Query::Frame(thread, frame))
         } else {
-            self.string_query(Query::All)
+            Arc::new(String::from("frame whoops!"))
+            // self.string_query(Query::All)
         }
     }
 
@@ -253,6 +259,7 @@ impl MapLogger {
 
         print_span_recursive(&mut output, &log.sub_spans, 0, span_to_print, range);
 
+        output = format!("{query:?}\n{output}");
         let result = Arc::new(output);
         log.cur_string = Some(result.clone());
         result
@@ -265,6 +272,10 @@ where
     S: for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
 {
     fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        let target = event.metadata().target();
+        if IGNORE_LIST.iter().any(|module| target.starts_with(module)) {
+            return;
+        }
         let mut log = self.state.lock().unwrap();
         // Invalidate any cached log printout
         log.cur_string = None;
@@ -286,6 +297,7 @@ where
         cur_span.events.push(EventEntry::Message(MessageEntry {
             level: *event.metadata().level(),
             fields,
+            target: target.to_owned(),
         }));
     }
 
@@ -295,6 +307,10 @@ where
         id: &tracing::span::Id,
         ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        let target = attrs.metadata().target();
+        if IGNORE_LIST.iter().any(|module| target.starts_with(module)) {
+            return;
+        }
         let mut log = self.state.lock().unwrap();
         // Invalidate any cache log printout
         log.cur_string = None;
@@ -334,12 +350,18 @@ where
 
         if let Some(idx) = new_entry.idx {
             if span.name() == TRACE_THREAD_SPAN {
+                eprintln!("thread! {}", span.name());
                 log.thread_spans.insert(idx, new_span_id);
             } else if span.name() == TRACE_FRAME_SPAN {
+                eprintln!("frame! {}", span.name());
                 if let Some(thread_idx) = parent_span.idx {
                     log.frame_spans.insert((thread_idx, idx), new_span_id);
                 }
+            } else {
+                eprintln!("no name! {}", span.name())
             }
+        } else {
+            eprintln!("no idx! {}", span.name())
         }
 
         log.sub_spans.insert(new_span_id, new_entry);
@@ -349,7 +371,10 @@ where
         // Mark the span as GC-able and remove it from the live mappings,
         // as tracing may now recycle the id for future spans!
         let mut log = self.state.lock().unwrap();
-        let span_id = log.live_spans[&id];
+        let Some(&span_id) = log.live_spans.get(&id) else {
+            // Skipped span, ignore
+            return;
+        };
         log.sub_spans.get_mut(&span_id).unwrap().destroyed = true;
         log.live_spans.remove(&id);
     }

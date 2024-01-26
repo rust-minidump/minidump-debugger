@@ -24,12 +24,12 @@ inline = []
 eframe = "0.18.0"
 egui = "0.18.1"
 egui_extras = "0.18.0"
-memmap2 = "0.5.5"
-breakpad-symbols = { version = "0.18.0" }
-minidump = { version = "0.18.0" }
-minidump-common = { version = "0.18.0" }
-minidump-processor = { version = "0.18.0", features = ["http", "dump_syms", "debuginfo"] }
-minidump-unwind = { version = "0.18.0", features = ["debuginfo", "http", "swift"] }
+memmap2 = "0.8.0"
+breakpad-symbols = { version = "0.19.0" }
+minidump = { version = "0.19.0" }
+minidump-common = { version = "0.19.0" }
+minidump-processor = { version = "0.19.0", features = ["http", "dump_syms", "debuginfo"] }
+minidump-unwind = { version = "0.19.0", features = ["debuginfo", "http", "swift"] }
 num-traits = "0.2.15"
 rfd = "0.9.1"
 tempfile = "3.3.0"
