@@ -2,6 +2,7 @@ use crate::MyApp;
 use eframe::egui;
 use egui::{Frame, TextStyle, Ui};
 use egui_extras::{Size, TableBuilder};
+use itertools::Itertools;
 use memmap2::Mmap;
 use minidump::{format::MINIDUMP_STREAM_TYPE, Minidump};
 use num_traits::FromPrimitive;
@@ -39,6 +40,7 @@ impl MyApp {
                 }
                 let stream = dump
                     .all_streams()
+                    .sorted_by(|a, b| Ord::cmp(&a.stream_type, &b.stream_type))
                     .nth(self.raw_dump_ui_state.cur_stream - 1)
                     .and_then(|entry| MINIDUMP_STREAM_TYPE::from_u32(entry.stream_type));
                 if let Some(stream) = stream {
@@ -80,7 +82,11 @@ impl MyApp {
         ui.separator();
         ui.selectable_value(&mut self.raw_dump_ui_state.cur_stream, 0, "<summary>");
 
-        for (i, stream) in dump.all_streams().enumerate() {
+        for (i, stream) in dump
+            .all_streams()
+            .sorted_by(|a, b| Ord::cmp(&a.stream_type, &b.stream_type))
+            .enumerate()
+        {
             use MINIDUMP_STREAM_TYPE::*;
             let (supported, label) =
                 if let Some(stream_type) = MINIDUMP_STREAM_TYPE::from_u32(stream.stream_type) {
@@ -147,7 +153,11 @@ impl MyApp {
                 });
             })
             .body(|mut body| {
-                for (i, stream) in dump.all_streams().enumerate() {
+                for (i, stream) in dump
+                    .all_streams()
+                    .sorted_by(|a, b| Ord::cmp(&a.stream_type, &b.stream_type))
+                    .enumerate()
+                {
                     body.row(row_height, |mut row| {
                         row.col(|ui| {
                             ui.centered_and_justified(|ui| {
